@@ -1,0 +1,3 @@
+# Additional dependencies for Laba deployment (Supabase ingestion)
+# Base requirements are in requirements.txt
+supabase>=2.0.0

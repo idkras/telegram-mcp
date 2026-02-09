@@ -18,7 +18,8 @@ from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from telethon.tl.types import Message, TotalList, Channel, Chat, User, MessageReplyStoryHeader  # type: ignore
-    from telethon.tl.types.base import Entity  # type: ignore
+    # Entity не существует в telethon 1.41.2, используем Union[Channel, Chat, User]
+    Entity = Union[Channel, Chat, User]  # type: ignore
     from telethon.tl.types import (  # type: ignore
         InputPeerUser, InputPeerChannel, InputPeerChat, InputPeerEmpty,
         InputUser, InputUserEmpty, InputUserSelf, InputUserFromMessage,
@@ -53,11 +54,21 @@ from telethon.tl.types import (  # type: ignore
     InputChatUploadedPhoto,
     User,
 )
-from telethon.tl.types.base import Entity  # type: ignore
+# Entity не существует в telethon 1.41.2, используем Union[Channel, Chat, User]
+# from telethon.tl.types.base import Entity  # REMOVED: не существует в telethon 1.41.2
 
-# from heroes_platform.shared.credentials_wrapper import get_service_credentials
-# from heroes_platform.shared.import_setup import enable
-# enable(__file__)
+# СНАЧАЛА настраиваем импорты
+from heroes_platform.shared.import_setup import enable
+enable(__file__)
+
+# ПОТОМ импортируем heroes_platform модули
+from heroes_platform.shared.credentials_wrapper import get_service_credentials
+from heroes_platform.telegram_mcp.chat_search_utils import (
+    search_chats_by_keyword_impl,
+    get_all_chats_list_impl,
+    analyze_chat_messages_for_bots_impl,
+    json_serializer as chat_search_json_serializer,
+)
 
 
 def json_serializer(obj):
@@ -2464,6 +2475,59 @@ async def get_bot_info(bot_username: str) -> str:
 
 
 @mcp.tool()
+async def get_user_full_info(user_id: int | None = None, username: str | None = None) -> str:
+    """
+    Get full user profile information including bio/about.
+    
+    Args:
+        user_id: User ID (if known)
+        username: Username (e.g., "username" without @)
+    
+    Returns:
+        JSON string with full user information including bio/about
+    """
+    try:
+        if not client.is_connected():
+            await client.start()  # type: ignore
+        
+        # Validate that at least one parameter is provided
+        if not user_id and not username:
+            return json.dumps({"error": "Either user_id or username must be provided"}, ensure_ascii=False)
+        
+        # Get user entity
+        if username:
+            entity = await client.get_entity(username)
+        elif user_id:
+            entity = await client.get_entity(user_id)
+        else:
+            return json.dumps({"error": "Failed to get user entity"}, ensure_ascii=False)
+        
+        # Get full user info
+        result = await client(functions.users.GetFullUserRequest(id=entity))
+        
+        # Extract user info
+        user_info = {
+            "id": entity.id,
+            "first_name": getattr(entity, "first_name", ""),
+            "last_name": getattr(entity, "last_name", ""),
+            "username": getattr(entity, "username", None),
+            "phone": getattr(entity, "phone", None),
+            "is_bot": getattr(entity, "bot", False),
+            "verified": getattr(entity, "verified", False),
+            "about": None,  # Will be filled from result
+        }
+        
+        # Get bio/about from full user
+        if hasattr(result, "full_user") and hasattr(result.full_user, "about"):
+            user_info["about"] = result.full_user.about
+        
+        return json.dumps(user_info, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.exception(f"get_user_full_info failed (user_id={user_id}, username={username})")
+        return log_and_format_error("get_user_full_info", e, user_id=user_id, username=username)
+
+
+@mcp.tool()
 async def set_bot_commands(bot_username: str, commands: list) -> str:
     """
     Set bot commands for a bot you own.
@@ -2719,6 +2783,82 @@ async def get_pinned_messages(chat_id: int) -> str:
         return log_and_format_error("get_pinned_messages", e, chat_id=chat_id)
 
 
+@mcp.tool()
+async def search_chats_by_keyword(keyword: str, chat_type: str | None = None, limit: int | None = None) -> str:
+    """
+    Search chats by keyword in title (case-insensitive).
+    
+    Universal method for finding chats by any keyword.
+    
+    Args:
+        keyword: Keyword to search for in chat titles
+        chat_type: Filter by chat type ('user', 'group', 'channel', or None for all)
+        limit: Maximum number of chats to return (None for all)
+    
+    Returns:
+        JSON string with list of matching chats
+    """
+    try:
+        if not client.is_connected():
+            await client.start()  # type: ignore
+        
+        result = await search_chats_by_keyword_impl(client, keyword, chat_type, limit)
+        return json.dumps(result, indent=2, ensure_ascii=False, default=chat_search_json_serializer)
+    except Exception as e:
+        logger.exception(f"search_chats_by_keyword failed (keyword={keyword})")
+        return log_and_format_error("search_chats_by_keyword", e, keyword=keyword, chat_type=chat_type, limit=limit)
+
+
+@mcp.tool()
+async def get_all_chats_list(chat_type: str | None = None, limit: int | None = None) -> str:
+    """
+    Get all chats with optional filtering by type.
+    
+    Universal method for getting all chats with pagination support.
+    
+    Args:
+        chat_type: Filter by chat type ('user', 'group', 'channel', or None for all)
+        limit: Maximum number of chats to return (None for all)
+    
+    Returns:
+        JSON string with list of all chats
+    """
+    try:
+        if not client.is_connected():
+            await client.start()  # type: ignore
+        
+        result = await get_all_chats_list_impl(client, chat_type, limit)
+        return json.dumps(result, indent=2, ensure_ascii=False, default=chat_search_json_serializer)
+    except Exception as e:
+        logger.exception(f"get_all_chats_list failed")
+        return log_and_format_error("get_all_chats_list", e, chat_type=chat_type, limit=limit)
+
+
+@mcp.tool()
+async def analyze_chat_messages_for_bots(chat_id: int, message_limit: int = 100) -> str:
+    """
+    Analyze chat messages to determine if chat contains only bot messages or has client messages.
+    
+    Universal method for analyzing chat message sources.
+    
+    Args:
+        chat_id: The ID of the chat to analyze
+        message_limit: Maximum number of messages to analyze (default: 100)
+    
+    Returns:
+        JSON string with analysis results
+    """
+    try:
+        if not client.is_connected():
+            await client.start()  # type: ignore
+        
+        result = await analyze_chat_messages_for_bots_impl(client, chat_id, message_limit)
+        return json.dumps(result, indent=2, ensure_ascii=False, default=chat_search_json_serializer)
+    except Exception as e:
+        logger.exception(f"analyze_chat_messages_for_bots failed (chat_id={chat_id})")
+        return log_and_format_error("analyze_chat_messages_for_bots", e, chat_id=chat_id, message_limit=message_limit)
+
+
 if __name__ == "__main__":
     nest_asyncio.apply()
 
@@ -2727,6 +2867,16 @@ if __name__ == "__main__":
             # Start the Telethon client non-interactively
             print("Starting Telegram client...", file=sys.stderr)
             await client.start()  # type: ignore
+
+            # Register Supabase event handlers when running on laba
+            if os.getenv("LABA_MODE") == "true":
+                try:
+                    from heroes_platform.telegram_mcp.event_handlers import (
+                        register_event_handlers,
+                    )
+                    register_event_handlers(client)
+                except Exception as eh_err:
+                    print(f"⚠️ Failed to register event handlers: {eh_err}", file=sys.stderr)
 
             print("Telegram client started. Running MCP server...", file=sys.stderr)
             # Use the asynchronous entrypoint instead of mcp.run()

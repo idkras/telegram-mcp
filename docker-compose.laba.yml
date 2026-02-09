@@ -1,0 +1,58 @@
+# Telegram MCP Server - Laba Deployment
+# Standard: Rick.ai Laba Deployment Standard 5.18
+#
+# Usage:
+#   docker compose -f docker-compose.laba.yml up -d
+#   docker compose -f docker-compose.laba.yml logs -f telegram-mcp-laba
+#
+# Prerequisites:
+#   1. .env.laba file with credentials (NEVER commit to git)
+#   2. Supabase migration applied (telegram_messages_raw table exists)
+#   3. Telegram session string generated
+
+version: '3.8'
+
+services:
+  telegram-mcp-laba:
+    build:
+      context: ../../  # Build from workspace root to access shared modules
+      dockerfile: heroes_platform/telegram_mcp/Dockerfile.laba
+    container_name: telegram-mcp-laba
+    env_file:
+      - .env.laba
+    environment:
+      - LABA_MODE=true
+      - PYTHONPATH=/app
+    # Keep stdin open for MCP stdio mode
+    stdin_open: true
+    tty: true
+    # Persist Telegram session state
+    volumes:
+      - telegram-session-data:/app/sessions
+    restart: unless-stopped
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+    # Logging configuration
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    # Health check
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "heroes_platform.telegram_mcp.main"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  telegram-session-data:
+    driver: local
