@@ -359,18 +359,21 @@ class SupabaseWriter:
             Number of messages written.
         """
         cursor = await self.get_chat_cursor(chat_id)
-        from_message_id = 0
+        max_id = None  # No limit for initial run
         if cursor and cursor.get("last_backfill_message_id"):
-            from_message_id = cursor["last_backfill_message_id"]
+            # Resume: get messages OLDER than last_backfill (lower ids)
+            max_id = cursor["last_backfill_message_id"]
 
         total_written = 0
         batch: list[Any] = []
         min_id_seen = float("inf")
 
         try:
-            async for msg in telethon_client.iter_messages(
-                int(chat_id), limit=limit, min_id=from_message_id,
-            ):
+            iter_kwargs: dict[str, Any] = {"entity": int(chat_id), "limit": limit}
+            if max_id is not None:
+                iter_kwargs["max_id"] = max_id
+
+            async for msg in telethon_client.iter_messages(**iter_kwargs):
                 batch.append(msg)
                 if msg.id < min_id_seen:
                     min_id_seen = msg.id
