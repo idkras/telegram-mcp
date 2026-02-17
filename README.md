@@ -107,6 +107,29 @@ chat_info = await get_chat(chat_id)
 - `"TELEGRAM_USER": "ik"` - профиль ik
 - `"TELEGRAM_USER": "ilyakrasinsky"` - профиль ilyakrasinsky
 
+## Таблицы Supabase: ik_telegram_chats и rick_telegram_chats
+
+- **ik_telegram_chats** — полная выгрузка всех чатов IK (исходная таблица после синка).
+- **rick_telegram_chats** — подмножество только чатов Rick.ai (клиенты, внутренние, бот): для быстрого поиска и выгрузки сообщений.
+
+В обе таблицы добавлена колонка **segment** (тип чата для индексации):
+
+| segment            | Описание |
+|--------------------|----------|
+| advising           | Advising клиенты Rick.ai |
+| pilot              | Пилот |
+| dogovorennosti     | Договорённости |
+| na_soprovozhdenii   | На сопровождении |
+| partners           | Партнёры |
+| internal           | Внутренние Rick (Flow, подстраховка, PM Care и т.д.) |
+| bot_feedback       | Rick.ai bot feedback |
+| community          | Комьюнити Heroes (HOC, PH, Management) |
+| other              | прочее |
+
+**Миграции:** 1) `20250215000000_rick_telegram_chats_create.sql` — создать таблицы `rick_telegram_chats` и `ik_telegram_chats` (если ещё нет). 2) `20250216000001_telegram_chats_segment.sql` — добавить колонку `segment` и индексы. Применить: Supabase Dashboard → SQL Editor (схема `rick_messages_tasks`). Либо: `APPLY_MIGRATION_FILE=.../20250215000000_rick_telegram_chats_create.sql python -m heroes_platform.heroes_telegram_mcp.scripts.apply_telegram_migration`, затем то же для `20250216000001_telegram_chats_segment.sql`.
+
+**Заполнение rick_telegram_chats (только чаты Rick.ai + индексация по segment):** запустить скрипт `python -m heroes_platform.heroes_telegram_mcp.scripts.sync_rick_telegram_chats_from_telegram_chats`. Скрипт читает `telegram_chats`, оставляет только чаты с «rick.ai»/«rick» в названии или username, проставляет segment по ключевым словам (advising, pilot, dogovorennosti, na_soprovozhdenii и т.д.) и перезаписывает `rick_telegram_chats`. Поиск и выгрузка сообщений: по таблице `rick_telegram_chats` с `WHERE segment = 'advising'` и т.д.
+
 ## Структура проекта
 
 ```

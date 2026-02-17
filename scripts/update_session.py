@@ -4,8 +4,8 @@ Telegram Session Token Updater
 Создает новый session token для telegram-mcp (default profile: ikrasinsky)
 
 📚 CODEBASE REFERENCES:
-- heroes_platform/telegram_mcp/session_manager.py - универсальный модуль для создания сессий
-- heroes_platform/telegram_mcp/connect_rick_coposlly_linkedinhero.py - пример для другого профиля
+- heroes_platform/heroes_telegram_mcp/session_manager.py - универсальный модуль для создания сессий
+- heroes_platform/heroes_telegram_mcp/scripts/connect_rick_coposlly_linkedinhero.py - пример для другого профиля
 - heroes_platform/shared/credentials_manager.py - управление credentials
 - heroes_platform/shared/credentials_wrapper.py - маппинг профилей на credential names
 
@@ -22,7 +22,7 @@ heroes_platform_path = Path(__file__).parent.parent.parent.parent
 if str(heroes_platform_path) not in sys.path:
     sys.path.insert(0, str(heroes_platform_path))
 
-from heroes_platform.telegram_mcp.session_manager import create_telegram_session  # type: ignore
+from heroes_platform.heroes_telegram_mcp.session_manager import create_telegram_session  # type: ignore
 
 
 async def create_new_session():

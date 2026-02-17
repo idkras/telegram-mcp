@@ -16,7 +16,7 @@ services:
   telegram-mcp-laba:
     build:
       context: ../../  # Build from workspace root to access shared modules
-      dockerfile: heroes_platform/telegram_mcp/Dockerfile.laba
+      dockerfile: heroes_platform/heroes_telegram_mcp/Dockerfile.laba
     container_name: telegram-mcp-laba
     env_file:
       - .env.laba
@@ -47,7 +47,7 @@ services:
         max-file: "5"
     # Health check
     healthcheck:
-      test: ["CMD", "pgrep", "-f", "heroes_platform.telegram_mcp.main"]
+      test: ["CMD", "pgrep", "-f", "heroes_platform.heroes_telegram_mcp.main"]
       interval: 60s
       timeout: 10s
       retries: 3

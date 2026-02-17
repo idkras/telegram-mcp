@@ -7,13 +7,16 @@ JTBD: Когда мне нужно загрузить историю сообщ�
 
 Usage:
   # Full backfill all Rick.ai chats (1830+), 5000 msg/chat
-  python -m heroes_platform.telegram_mcp.scripts.backfill_rick_ai_to_supabase
+  python -m heroes_platform.heroes_telegram_mcp.scripts.backfill_rick_ai_to_supabase
 
   # Test with 3 chats, 100 msg each
-  python -m heroes_platform.telegram_mcp.scripts.backfill_rick_ai_to_supabase --limit-chats 3 --limit-messages 100
+  python -m heroes_platform.heroes_telegram_mcp.scripts.backfill_rick_ai_to_supabase --limit-chats 3 --limit-messages 100
 
   # Incremental (resume from cursors in telegram_chats)
-  python -m heroes_platform.telegram_mcp.scripts.backfill_rick_ai_to_supabase --incremental
+  python -m heroes_platform.heroes_telegram_mcp.scripts.backfill_rick_ai_to_supabase --incremental
+
+  # All my conversations (not just rick.ai)
+  python -m heroes_platform.heroes_telegram_mcp.scripts.backfill_rick_ai_to_supabase --all-chats
 
 Prerequisites:
   - Migrations applied: 20250110000001_telegram_tdlib_tables.sql
@@ -38,8 +41,11 @@ from heroes_platform.shared.import_setup import enable
 enable(__file__)
 
 from heroes_platform.shared.credentials_wrapper import get_service_credentials
-from heroes_platform.telegram_mcp.chat_search_utils import search_chats_by_keyword_impl
-from heroes_platform.telegram_mcp.supabase_writer import SupabaseWriter
+from heroes_platform.heroes_telegram_mcp.chat_search_utils import (
+    search_chats_by_keyword_impl,
+    get_all_chats_list_impl,
+)
+from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
@@ -56,6 +62,11 @@ def _get_chat_type(t: str) -> str:
 async def main() -> int:
     parser = argparse.ArgumentParser(description="Backfill Rick.ai chats to Supabase")
     parser.add_argument("--keyword", default="rick.ai", help="Keyword to filter chats")
+    parser.add_argument(
+        "--all-chats",
+        action="store_true",
+        help="Load ALL conversations (ignore keyword, use get_all_chats_list)",
+    )
     parser.add_argument("--limit-chats", type=int, default=None, help="Max chats to process")
     parser.add_argument("--limit-messages", type=int, default=5000, help="Max messages per chat")
     args = parser.parse_args()
@@ -75,11 +86,17 @@ async def main() -> int:
     client = TelegramClient(StringSession(session_str), api_id, api_hash)
     await client.start()
 
-    # 2. Get Rick.ai chats via search
-    result = await search_chats_by_keyword_impl(client, args.keyword)
-    chats = result.get("chats", [])
+    # 2. Get chats: all or by keyword
+    if args.all_chats:
+        result = await get_all_chats_list_impl(client)
+        chats = result.get("chats", [])
+        logger.info("Loading ALL conversations: %d chats", len(chats))
+    else:
+        result = await search_chats_by_keyword_impl(client, args.keyword)
+        chats = result.get("chats", [])
     if not chats:
-        logger.warning("No chats found for keyword %r", args.keyword)
+        msg = "No chats found" + (f" for keyword {args.keyword!r}" if not args.all_chats else "")
+        logger.warning(msg)
         await client.disconnect()
         return 0
 

@@ -4,8 +4,8 @@ Telegram Session Creator for Rick Coposlly LinkedinHero
 Создает session token для пользователя rick-coposlly-linkedinhero
 
 📚 CODEBASE REFERENCES:
-- heroes_platform/telegram_mcp/session_manager.py - универсальный модуль для создания сессий
-- heroes_platform/telegram_mcp/update_session.py - пример для default профиля
+- heroes_platform/heroes_telegram_mcp/session_manager.py - универсальный модуль для создания сессий
+- heroes_platform/heroes_telegram_mcp/scripts/update_session.py - пример для default профиля
 - heroes_platform/shared/credentials_manager.py - управление credentials
 - heroes_platform/shared/credentials_wrapper.py - маппинг профилей
 
@@ -22,7 +22,7 @@ heroes_platform_path = Path(__file__).parent.parent.parent.parent
 if str(heroes_platform_path) not in sys.path:
     sys.path.insert(0, str(heroes_platform_path))
 
-from heroes_platform.telegram_mcp.session_manager import create_telegram_session  # type: ignore
+from heroes_platform.heroes_telegram_mcp.session_manager import create_telegram_session  # type: ignore
 
 
 async def create_session_for_rick_coposlly_linkedinhero():

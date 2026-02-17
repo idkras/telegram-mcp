@@ -63,7 +63,7 @@ enable(__file__)
 
 # ПОТОМ импортируем heroes_platform модули
 from heroes_platform.shared.credentials_wrapper import get_service_credentials
-from heroes_platform.telegram_mcp.chat_search_utils import (
+from heroes_platform.heroes_telegram_mcp.chat_search_utils import (
     search_chats_by_keyword_impl,
     get_all_chats_list_impl,
     analyze_chat_messages_for_bots_impl,
@@ -188,8 +188,66 @@ else:
     # Use file-based session
     client = TelegramClient(TELEGRAM_SESSION_NAME or "telegram_session", TELEGRAM_API_ID, TELEGRAM_API_HASH)
 
+# Optional second client for profile "lisa" (lazy-initialized)
+_lisa_client: Optional[TelegramClient] = None
+
+
+def _get_credentials_for_profile(profile: str) -> Optional[Dict[str, Any]]:
+    """Return credentials for the given profile by temporarily setting TELEGRAM_USER. Used for multi-profile send (e.g. lisa)."""
+    if (profile or "").strip().lower() != "lisa":
+        return None
+    old = os.environ.get("TELEGRAM_USER")
+    try:
+        os.environ["TELEGRAM_USER"] = "lisa"
+        return get_service_credentials("telegram")
+    finally:
+        if old is None:
+            os.environ.pop("TELEGRAM_USER", None)
+        else:
+            os.environ["TELEGRAM_USER"] = old
+
+
+async def _get_client_for_profile(profile: str) -> TelegramClient:
+    """Return the Telegram client for the given profile. 'default'/'ik'/'ikrasinsky' -> main client; 'lisa' -> lazy-created Lisa client."""
+    global _lisa_client
+    normalized = (profile or "default").strip().lower()
+    if normalized in ("", "default", "ik", "ikrasinsky", "ilyakrasinsky"):
+        return client
+    if normalized == "lisa":
+        if _lisa_client is None:
+            creds = _get_credentials_for_profile("lisa")
+            if not creds or not creds.get("TELEGRAM_API_HASH"):
+                raise ValueError("Lisa profile credentials not configured. Check Keychain and credentials_manager (lisa_tg_*).")
+            api_id = int(creds.get("TELEGRAM_API_ID", 0))
+            session_str = creds.get("TELEGRAM_SESSION_STRING")
+            if session_str:
+                _lisa_client = TelegramClient(StringSession(session_str), api_id, creds["TELEGRAM_API_HASH"])
+            else:
+                _lisa_client = TelegramClient("telegram_session_lisa", api_id, creds["TELEGRAM_API_HASH"])
+        return _lisa_client
+    raise ValueError(f"Unknown profile: {profile!r}. Use 'default'/'ik' or 'lisa'.")
+
+
+async def _sent_as_display(tg_client: TelegramClient) -> str:
+    """Return a short 'Sent as: Name (@username)' string for the given client (for visibility in tool response)."""
+    try:
+        if not tg_client.is_connected():
+            await tg_client.start()  # type: ignore
+        me = await tg_client.get_me()
+        if not me:
+            return "unknown"
+        name = getattr(me, "first_name", "") or ""
+        if getattr(me, "last_name", None):
+            name = f"{name} {me.last_name}".strip()
+        username = getattr(me, "username", None)
+        if username:
+            return f"{name or 'User'} (@{username})"
+        return name or "User"
+    except Exception:
+        return "unknown"
+
 # Setup robust logging with both file and console output
-logger = logging.getLogger("telegram_mcp")
+logger = logging.getLogger("heroes_telegram_mcp")
 logger.setLevel(logging.ERROR)  # Set to ERROR for production, INFO for debugging
 
 # Create console handler
@@ -396,19 +454,23 @@ async def get_messages(chat_id: int, page: int = 1, page_size: int = 20) -> str:
 
 
 @mcp.tool()
-async def send_message(chat_id: int, message: str) -> str:
+async def send_message(chat_id: int, message: str, profile: str = "default") -> str:
     """
     Send a message to a specific chat.
     Args:
         chat_id: The ID of the chat.
         message: The message content to send.
+        profile: Telegram account to send as: "default" or "ik"/"ikrasinsky" for main account, "lisa" for Lisa (@hello_liza_rickai). Response includes "Sent as: Name (@username)" so the active user is visible.
     """
     try:
-        entity = await client.get_entity(chat_id)
-        # Ensure we have a single entity, not a list
+        c = await _get_client_for_profile(profile)
+        if not c.is_connected():
+            await c.start()  # type: ignore
+        entity = await c.get_entity(chat_id)
         single_entity = ensure_single_entity(entity)
-        await client.send_message(single_entity, message)
-        return "Message sent successfully."
+        await c.send_message(single_entity, message)
+        sent_as = await _sent_as_display(c)
+        return f"Message sent successfully. Sent as: {sent_as}"
     except Exception as e:
         return log_and_format_error("send_message", e, chat_id=chat_id)
 
@@ -1193,7 +1255,7 @@ async def invite_to_group(group_id: int, user_ids: list) -> str:
 
     except Exception as e:
         logger.error(
-            f"telegram_mcp invite_to_group failed (group_id={group_id}, user_ids={user_ids})",
+            f"heroes_telegram_mcp invite_to_group failed (group_id={group_id}, user_ids={user_ids})",
             exc_info=True,
         )
         return log_and_format_error("invite_to_group", e, group_id=group_id, user_ids=user_ids)
@@ -1636,18 +1698,36 @@ async def delete_chat_photo(chat_id: int) -> str:
 
 
 @mcp.tool()
-async def promote_admin(group_id: int, user_id: int, rights: dict[Any, Any] | None = None) -> str:
+async def promote_admin(
+    group_id: int, user_id: int, rights: dict[Any, Any] | str | None = None
+) -> str:
     """
     Promote a user to admin in a group/channel.
 
     Args:
         group_id: ID of the group/channel
         user_id: User ID to promote
-        rights: Admin rights to give (optional)
+        rights: Admin rights to give (optional). Dict or JSON string. Include "add_admins": true to allow adding other admins.
     """
     try:
         chat = await client.get_entity(group_id)
         user = await client.get_entity(user_id)
+
+        # Parse rights if passed as JSON string (e.g. from MCP client)
+        if isinstance(rights, str):
+            s = rights.strip()
+            if not s:
+                rights = None
+            else:
+                try:
+                    rights = json.loads(s)
+                except json.JSONDecodeError as e:
+                    # Fix common typo: {}"key" -> {"key" (extra brace at start)
+                    if "Extra data" in str(e) and s.startswith('{}"'):
+                        s = "{" + s[2:]
+                        rights = json.loads(s)
+                    else:
+                        raise
 
         # Set default admin rights if not provided
         if not rights:
@@ -1691,7 +1771,7 @@ async def promote_admin(group_id: int, user_id: int, rights: dict[Any, Any] | No
 
     except Exception as e:
         logger.error(
-            f"telegram_mcp promote_admin failed (group_id={group_id}, user_id={user_id})",
+            f"heroes_telegram_mcp promote_admin failed (group_id={group_id}, user_id={user_id})",
             exc_info=True,
         )
         return log_and_format_error("promote_admin", e, group_id=group_id, user_id=user_id)
@@ -1737,7 +1817,7 @@ async def demote_admin(group_id: int, user_id: int) -> str:
 
     except Exception as e:
         logger.error(
-            f"telegram_mcp demote_admin failed (group_id={group_id}, user_id={user_id})",
+            f"heroes_telegram_mcp demote_admin failed (group_id={group_id}, user_id={user_id})",
             exc_info=True,
         )
         return log_and_format_error("demote_admin", e, group_id=group_id, user_id=user_id)
@@ -2161,14 +2241,23 @@ async def mark_as_read(chat_id: int) -> str:
 
 
 @mcp.tool()
-async def reply_to_message(chat_id: int, message_id: int, text: str) -> str:
+async def reply_to_message(chat_id: int, message_id: int, text: str, profile: str = "default") -> str:
     """
     Reply to a specific message in a chat.
+    Args:
+        chat_id: The ID of the chat.
+        message_id: The message ID to reply to.
+        text: The reply text.
+        profile: Telegram account to send as: "default"/"ik" for main account, "lisa" for Lisa. Response includes "Sent as: Name (@username)".
     """
     try:
-        entity = await client.get_entity(chat_id)
-        await client.send_message(entity, text, reply_to=message_id)
-        return f"Replied to message {message_id} in chat {chat_id}."
+        c = await _get_client_for_profile(profile)
+        if not c.is_connected():
+            await c.start()  # type: ignore
+        entity = await c.get_entity(chat_id)
+        await c.send_message(entity, text, reply_to=message_id)
+        sent_as = await _sent_as_display(c)
+        return f"Replied to message {message_id} in chat {chat_id}. Sent as: {sent_as}"
     except Exception as e:
         return log_and_format_error("reply_to_message", e, chat_id=chat_id, message_id=message_id, text=text)
 
@@ -2871,7 +2960,7 @@ if __name__ == "__main__":
             # Register Supabase event handlers when running on laba
             if os.getenv("LABA_MODE") == "true":
                 try:
-                    from heroes_platform.telegram_mcp.event_handlers import (
+                    from heroes_platform.heroes_telegram_mcp.event_handlers import (
                         register_event_handlers,
                     )
                     register_event_handlers(client)

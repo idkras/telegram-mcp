@@ -20,8 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy and install Python dependencies
 # Build context is workspace root (set in docker-compose.laba.yml)
-COPY heroes_platform/telegram_mcp/requirements.txt ./requirements.txt
-COPY heroes_platform/telegram_mcp/requirements-laba.txt ./requirements-laba.txt
+COPY heroes_platform/heroes_telegram_mcp/requirements.txt ./requirements.txt
+COPY heroes_platform/heroes_telegram_mcp/requirements-laba.txt ./requirements-laba.txt
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir -r requirements-laba.txt
@@ -33,12 +33,12 @@ COPY heroes_platform/__init__.py ./heroes_platform/__init__.py
 COPY heroes_platform/shared/ ./heroes_platform/shared/
 
 # Copy telegram MCP package
-COPY heroes_platform/telegram_mcp/__init__.py ./heroes_platform/telegram_mcp/__init__.py
-COPY heroes_platform/telegram_mcp/main.py ./heroes_platform/telegram_mcp/main.py
-COPY heroes_platform/telegram_mcp/chat_search_utils.py ./heroes_platform/telegram_mcp/chat_search_utils.py
-COPY heroes_platform/telegram_mcp/chat_exporter.py ./heroes_platform/telegram_mcp/chat_exporter.py
-COPY heroes_platform/telegram_mcp/supabase_writer.py ./heroes_platform/telegram_mcp/supabase_writer.py
-COPY heroes_platform/telegram_mcp/event_handlers.py ./heroes_platform/telegram_mcp/event_handlers.py
+COPY heroes_platform/heroes_telegram_mcp/__init__.py ./heroes_platform/heroes_telegram_mcp/__init__.py
+COPY heroes_platform/heroes_telegram_mcp/main.py ./heroes_platform/heroes_telegram_mcp/main.py
+COPY heroes_platform/heroes_telegram_mcp/chat_search_utils.py ./heroes_platform/heroes_telegram_mcp/chat_search_utils.py
+COPY heroes_platform/heroes_telegram_mcp/chat_exporter.py ./heroes_platform/heroes_telegram_mcp/chat_exporter.py
+COPY heroes_platform/heroes_telegram_mcp/supabase_writer.py ./heroes_platform/heroes_telegram_mcp/supabase_writer.py
+COPY heroes_platform/heroes_telegram_mcp/event_handlers.py ./heroes_platform/heroes_telegram_mcp/event_handlers.py
 
 # Create non-root user
 RUN adduser --disabled-password --gecos "" appuser \
@@ -63,6 +63,6 @@ ENV PYTHONPATH=/app
 
 # Health check: verify python process is running
 HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
-    CMD pgrep -f "heroes_platform.telegram_mcp.main" || exit 1
+    CMD pgrep -f "heroes_platform.heroes_telegram_mcp.main" || exit 1
 
-CMD ["python", "-m", "heroes_platform.telegram_mcp.main"]
+CMD ["python", "-m", "heroes_platform.heroes_telegram_mcp.main"]

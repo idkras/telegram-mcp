@@ -62,16 +62,21 @@ async def search_chats_by_keyword_impl(
     client: Any,
     keyword: str,
     chat_type: str | None = None,
-    limit: int | None = None
+    limit: int | None = None,
+    max_dialogs_to_scan: int | None = 500,
 ) -> dict[str, Any]:
     """
     Универсальная реализация поиска чатов по ключевому слову.
+    
+    Ограничивает число просматриваемых диалогов (max_dialogs_to_scan), чтобы избежать
+    долгого выполнения при большом числе чатов (см. ai.incidents 15 Feb 2026).
     
     Args:
         client: TelegramClient instance
         keyword: Keyword to search for in chat titles
         chat_type: Filter by chat type ('user', 'group', 'channel', or None for all)
         limit: Maximum number of chats to return (None for all)
+        max_dialogs_to_scan: Stop iterating after this many dialogs (default 500); None = no cap
     
     Returns:
         Dictionary with search results
@@ -79,79 +84,96 @@ async def search_chats_by_keyword_impl(
     keyword_lower = keyword.lower()
     matching_chats = []
     count = 0
-    
+    dialogs_scanned = 0
+
     async for dialog in client.iter_dialogs():
+        dialogs_scanned += 1
+        if max_dialogs_to_scan is not None and dialogs_scanned >= max_dialogs_to_scan:
+            break
+
         entity = dialog.entity
         title = getattr(entity, "title", None) or getattr(entity, "first_name", "")
-        
+
         # Check keyword match
         if not title or keyword_lower not in title.lower():
             continue
-        
+
         # Determine chat type
         current_type = get_chat_type(entity)
-        
+
         # Filter by type if requested
         if chat_type and current_type != chat_type.lower():
             continue
-        
+
         chat_info = format_chat_info(entity, dialog)
         matching_chats.append(chat_info)
         count += 1
-        
+
         # Apply limit if specified
         if limit and count >= limit:
             break
-    
+
     return {
         "keyword": keyword,
         "chat_type_filter": chat_type,
         "total_found": len(matching_chats),
-        "chats": matching_chats
+        "dialogs_scanned": dialogs_scanned,
+        "chats": matching_chats,
     }
 
 
 async def get_all_chats_list_impl(
     client: Any,
     chat_type: str | None = None,
-    limit: int | None = None
+    limit: int | None = None,
+    max_dialogs_to_scan: int | None = 500,
 ) -> dict[str, Any]:
     """
     Универсальная реализация получения всех чатов.
+    
+    Ограничивает число просматриваемых диалогов (max_dialogs_to_scan), чтобы избежать
+    долгого выполнения при большом числе чатов (см. ai.incidents 15 Feb 2026).
     
     Args:
         client: TelegramClient instance
         chat_type: Filter by chat type ('user', 'group', 'channel', or None for all)
         limit: Maximum number of chats to return (None for all)
+        max_dialogs_to_scan: Stop iterating after this many dialogs (default 500); None = no cap
     
     Returns:
         Dictionary with all chats
     """
     all_chats = []
     count = 0
-    
+    dialogs_scanned = 0
+
     async for dialog in client.iter_dialogs():
+        dialogs_scanned += 1
+        if max_dialogs_to_scan is not None and dialogs_scanned >= max_dialogs_to_scan:
+            break
+
         entity = dialog.entity
-        
+
         # Determine chat type
         current_type = get_chat_type(entity)
-        
+
         # Filter by type if requested
         if chat_type and current_type != chat_type.lower():
             continue
-        
+
         chat_info = format_chat_info(entity, dialog)
         all_chats.append(chat_info)
         count += 1
-        
+
         # Apply limit if specified
         if limit and count >= limit:
             break
-    
+
     return {
         "chat_type_filter": chat_type,
         "total_chats": len(all_chats),
-        "chats": all_chats
+        "dialogs_scanned": dialogs_scanned,
+        "chats": all_chats,
     }
 
 

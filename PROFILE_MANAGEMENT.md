@@ -21,7 +21,7 @@ No configuration needed - just use Telegram MCP commands and they will work with
 1. Edit `.cursor/mcp.json`
 2. Add or change `"TELEGRAM_USER": "rick-coposlly-linkedinhero"` in `env` section
 3. Restart Cursor to reload MCP configuration
-4. **First time setup:** Run `heroes_platform/telegram_mcp/scripts/connect_rick_coposlly_linkedinhero.sh` to create session
+4. **First time setup:** Run `heroes_platform/heroes_telegram_mcp/scripts/connect_rick_coposlly_linkedinhero.sh` to create session
 
 ## 🔑 **Keychain Key Mapping**
 
@@ -129,11 +129,11 @@ grep -A 5 "telegram-mcp" .cursor/mcp.json | grep "TELEGRAM_USER" || echo "Using 
 2. **Create session:**
    ```bash
    # Option 1: Use shell wrapper (recommended)
-   heroes_platform/telegram_mcp/scripts/connect_rick_coposlly_linkedinhero.sh
+   heroes_platform/heroes_telegram_mcp/scripts/connect_rick_coposlly_linkedinhero.sh
    
    # Option 2: Direct Python execution
    cd /Users/ilyakrasinsky/workspace/vscode.projects/heroes-rickai-workspace
-   .venv/bin/python3 heroes_platform/telegram_mcp/scripts/connect_rick_coposlly_linkedinhero.py
+   .venv/bin/python3 heroes_platform/heroes_telegram_mcp/scripts/connect_rick_coposlly_linkedinhero.py
    ```
    - Phone number will be loaded from Keychain automatically
    - Enter verification code from Telegram when prompted
@@ -147,15 +147,15 @@ grep -A 5 "telegram-mcp" .cursor/mcp.json | grep "TELEGRAM_USER" || echo "Using 
 ## 📚 **Codebase References for Session Management**
 
 **📁 Core Modules:**
-- `heroes_platform/telegram_mcp/session_manager.py` - универсальный модуль для создания сессий
+- `heroes_platform/heroes_telegram_mcp/session_manager.py` - универсальный модуль для создания сессий
   - `create_telegram_session(profile)` - создание сессии для любого профиля
   - `test_session(profile)` - проверка валидности сессии
   - `get_profile_credential_names(profile)` - маппинг профиля на credential names
 
 **📁 Session Scripts:**
-- `heroes_platform/telegram_mcp/scripts/update_session.py` - скрипт для default профиля (ikrasinsky)
-- `heroes_platform/telegram_mcp/scripts/connect_rick_coposlly_linkedinhero.py` - скрипт для rick-coposlly-linkedinhero
-- `heroes_platform/telegram_mcp/scripts/connect_rick_coposlly_linkedinhero.sh` - shell wrapper
+- `heroes_platform/heroes_telegram_mcp/scripts/update_session.py` - скрипт для default профиля (ikrasinsky)
+- `heroes_platform/heroes_telegram_mcp/scripts/connect_rick_coposlly_linkedinhero.py` - скрипт для rick-coposlly-linkedinhero
+- `heroes_platform/heroes_telegram_mcp/scripts/connect_rick_coposlly_linkedinhero.sh` - shell wrapper
 
 **📁 Configuration:**
 - `heroes_platform/shared/credentials_manager.py` - конфигурация всех credentials
@@ -165,5 +165,5 @@ grep -A 5 "telegram-mcp" .cursor/mcp.json | grep "TELEGRAM_USER" || echo "Using 
 1. Add credential configs to `credentials_manager._setup_default_configs()`
 2. Add profile mapping to `credentials_wrapper.get_service_credentials()`
 3. Add credential names mapping to `session_manager.get_profile_credential_names()`
-4. Create script in `heroes_platform/telegram_mcp/scripts/` using `session_manager.create_telegram_session()`
+4. Create script in `heroes_platform/heroes_telegram_mcp/scripts/` using `session_manager.create_telegram_session()`
 5. Update this documentation

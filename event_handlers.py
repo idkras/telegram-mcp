@@ -13,7 +13,7 @@ Architecture:
 
 Usage:
     # In main.py, after client.start():
-    from heroes_platform.telegram_mcp.event_handlers import register_event_handlers
+    from heroes_platform.heroes_telegram_mcp.event_handlers import register_event_handlers
     if os.getenv("LABA_MODE") == "true":
         register_event_handlers(client)
 """
@@ -33,7 +33,7 @@ def _get_writer() -> Any:
     """Lazy-init SupabaseWriter."""
     global _writer
     if _writer is None:
-        from heroes_platform.telegram_mcp.supabase_writer import SupabaseWriter
+        from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
 
         telegram_user = os.getenv("TELEGRAM_USER", "ikrasinsky")
         _writer = SupabaseWriter(telegram_user_id=telegram_user)

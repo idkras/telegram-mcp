@@ -29,9 +29,10 @@ enable(__file__)
 
 from heroes_platform.shared.credentials_manager import credentials_manager
 
-# Import from telegram-mcp directory (legacy structure)
+# Import from heroes_telegram_mcp package (same repo)
 
-telegram_mcp_path = Path(__file__).parent.parent / "telegram-mcp"
+# Same package (heroes_telegram_mcp); legacy "telegram-mcp" path no longer used
+telegram_mcp_path = Path(__file__).parent.parent / "heroes_telegram_mcp"
 if str(telegram_mcp_path) not in sys.path:
     sys.path.insert(0, str(telegram_mcp_path))
 
@@ -807,7 +808,7 @@ class ChatExporter:
 
 ## 📝 Usage
 
-Этот экспорт создан с помощью telegram-mcp с интеграцией Mac Keychain.
+Этот экспорт создан с помощью heroes_telegram_mcp (Telegram MCP) с интеграцией Mac Keychain.
 Для повторного экспорта используйте команду:
 
 ```bash

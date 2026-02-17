@@ -5,10 +5,14 @@ RELEASE 0: Валидация схемы Supabase для Telegram MCP Laba Deplo
 JTBD: Как разработчик, я хочу проверить схему таблицы telegram_messages_raw в Supabase,
 чтобы убедиться что структура данных соответствует формату bronze JSON из Telegram MCP.
 
+Когда задан SUPABASE_DB_URL (или Keychain supabase_rick_db_url), валидация идёт через
+прямое подключение Postgres (как laba/n8n) — Exposed schemas не требуются.
+
 Стандарт: From-The-End Process Standard v2.9
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict
@@ -27,7 +31,57 @@ except ImportError as e:
     sys.exit(1)
 
 SUPABASE_URL = "https://supabase.rick.ai"
+SUPABASE_SCHEMA = "rick_messages_tasks"  # Same as rick_clients_tasks
 TABLE_NAME = "telegram_messages_raw"
+
+
+def get_postgres_url() -> str | None:
+    """Postgres URL для прямого подключения (как apply_telegram_migration / laba/n8n)."""
+    url = os.getenv("SUPABASE_DB_URL")
+    if url:
+        return url
+    try:
+        result = credentials_manager.get_credential("supabase_rick_db_url")
+        if result.success and result.value:
+            return result.value
+    except Exception:
+        pass
+    return None
+
+
+def validate_via_direct_postgres(postgres_url: str) -> Dict[str, Any]:
+    """Валидирует схему через прямое Postgres-подключение (без REST, без Exposed schemas)."""
+    validation_result = {
+        "table_exists": False,
+        "columns": {},
+        "indexes": [],
+        "sample_data": None,
+        "errors": [],
+    }
+    try:
+        import psycopg2
+    except ImportError:
+        validation_result["errors"].append(
+            "psycopg2 не установлен. pip install psycopg2-binary"
+        )
+        return validation_result
+    try:
+        conn = psycopg2.connect(postgres_url)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM rick_messages_tasks.telegram_messages_raw LIMIT 1"
+        )
+        validation_result["table_exists"] = True
+        row = cur.fetchone()
+        if row:
+            cols = [d[0] for d in cur.description]
+            validation_result["sample_data"] = dict(zip(cols, row))
+            validation_result["columns"] = {c: str(type(v).__name__) for c, v in zip(cols, row)}
+        cur.close()
+        conn.close()
+    except Exception as e:
+        validation_result["errors"].append(f"Ошибка при проверке через Postgres: {e}")
+    return validation_result
 
 
 def get_supabase_client() -> Client | None:
@@ -125,7 +179,8 @@ def validate_supabase_schema(supabase_client: Client) -> Dict[str, Any]:
     try:
         # Проверяем существование таблицы через запрос
         print("\n📋 Проверка существования таблицы...")
-        response = supabase_client.table(TABLE_NAME).select("id").limit(1).execute()
+        tbl = supabase_client.schema(SUPABASE_SCHEMA).from_(TABLE_NAME)
+        response = tbl.select("id").limit(1).execute()
 
         validation_result["table_exists"] = True
         print("✅ Таблица telegram_messages_raw существует")
@@ -134,7 +189,8 @@ def validate_supabase_schema(supabase_client: Client) -> Dict[str, Any]:
         print("\n📊 Получение структуры таблицы...")
         # Пытаемся получить пример данных для анализа структуры
         sample_response = (
-            supabase_client.table(TABLE_NAME)
+            supabase_client.schema(SUPABASE_SCHEMA)
+            .from_(TABLE_NAME)
             .select("*")
             .limit(1)
             .execute()
@@ -270,13 +326,29 @@ def main():
     print("🚀 RELEASE 0: ВАЛИДАЦИЯ СХЕМЫ SUPABASE")
     print("=" * 80)
 
-    # Шаг 1: Получить Supabase клиент
-    print("\n📡 Шаг 1: Подключение к Supabase...")
-    supabase_client = get_supabase_client()
-    if not supabase_client:
-        print("❌ Не удалось подключиться к Supabase")
-        sys.exit(1)
-    print("✅ Подключение к Supabase успешно")
+    # Шаг 1: Подключение — приоритет прямому Postgres (как laba/n8n)
+    postgres_url = get_postgres_url()
+    supabase_schema = None
+    if postgres_url:
+        print("\n📡 Шаг 1: Прямое подключение Postgres (SUPABASE_DB_URL / supabase_rick_db_url)")
+        print("   Exposed schemas не требуются.")
+        print("\n🔍 Валидация схемы через Postgres...")
+        supabase_schema = validate_via_direct_postgres(postgres_url)
+        if supabase_schema.get("errors"):
+            print("⚠️  Ошибки при валидации через Postgres (см. ниже)")
+        else:
+            print("✅ Таблица rick_messages_tasks.telegram_messages_raw доступна")
+    if not postgres_url or (supabase_schema and supabase_schema.get("errors")):
+        if not postgres_url:
+            print("\n📡 Шаг 1: Подключение к Supabase REST API...")
+        supabase_client = get_supabase_client()
+        if not supabase_client:
+            print("❌ Не удалось подключиться к Supabase (REST). Задайте SUPABASE_DB_URL для прямого Postgres.")
+            sys.exit(1)
+        if not postgres_url:
+            print("✅ Подключение к Supabase успешно")
+        print("\n🔍 Валидация схемы через REST API...")
+        supabase_schema = validate_supabase_schema(supabase_client)
 
     # Шаг 2: Загрузить пример bronze данных
     print("\n📦 Шаг 2: Загрузка примера bronze данных...")
@@ -288,9 +360,7 @@ def main():
                 f"   Структура raw: {list(bronze_example['bronze_example'].get('raw', {}).keys())}"
             )
 
-    # Шаг 3: Валидировать схему Supabase
-    print("\n🔍 Шаг 3: Валидация схемы Supabase...")
-    supabase_schema = validate_supabase_schema(supabase_client)
+    # Шаг 3: Валидация схемы уже выполнена выше (Postgres или REST)
 
     # Шаг 4: Сравнить bronze со схемой
     print("\n🔄 Шаг 4: Сравнение структур...")
