@@ -193,6 +193,24 @@ def _chat_id_candidates(chat_id: int) -> List[int]:
     return unique
 
 
+async def _ensure_client_connected(tg_client: TelegramClient) -> None:
+    """Ensure Telethon client is connected, handling asyncio event loop changes."""
+    if tg_client.is_connected():
+        return
+    try:
+        await tg_client.start()  # type: ignore
+    except RuntimeError as e:
+        if "event loop" in str(e).lower():
+            # Event loop changed after initial connection — disconnect and reconnect in current loop
+            try:
+                await tg_client.disconnect()
+            except Exception:
+                pass
+            await tg_client.start()  # type: ignore
+        else:
+            raise
+
+
 async def _resolve_chat_entity(chat_id: int, tg_client: Optional[TelegramClient] = None, scan_limit: int = 1000):
     """Resolve chat entity robustly for positive/peer chat IDs.
 
@@ -200,8 +218,7 @@ async def _resolve_chat_entity(chat_id: int, tg_client: Optional[TelegramClient]
     Fallback path: scan dialogs and match by both `entity.id` and `utils.get_peer_id(entity)`.
     """
     active_client = tg_client or client
-    if not active_client.is_connected():
-        await active_client.start()  # type: ignore
+    await _ensure_client_connected(active_client)
 
     candidates = _chat_id_candidates(chat_id)
     errors: List[str] = []
@@ -209,10 +226,26 @@ async def _resolve_chat_entity(chat_id: int, tg_client: Optional[TelegramClient]
     for candidate in candidates:
         try:
             return await active_client.get_entity(candidate)
+        except RuntimeError as exc:
+            if "event loop" in str(exc).lower():
+                await _ensure_client_connected(active_client)
+                try:
+                    return await active_client.get_entity(candidate)
+                except Exception as retry_exc:  # noqa: BLE001
+                    errors.append(f"{candidate}: {retry_exc}")
+            else:
+                errors.append(f"{candidate}: {exc}")
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{candidate}: {exc}")
 
-    dialogs = await active_client.get_dialogs(limit=scan_limit)
+    try:
+        dialogs = await active_client.get_dialogs(limit=scan_limit)
+    except RuntimeError as e:
+        if "event loop" in str(e).lower():
+            await _ensure_client_connected(active_client)
+            dialogs = await active_client.get_dialogs(limit=scan_limit)
+        else:
+            raise
     for dialog in dialogs:
         entity = dialog.entity
         entity_id = safe_get_entity_id(entity)
@@ -786,8 +819,7 @@ async def get_chat(chat_id: int) -> str:
         chat_id: The ID of the chat.
     """
     try:
-        if not client.is_connected():
-            await client.start()  # type: ignore
+        await _ensure_client_connected(client)
         entity = await _resolve_chat_entity(chat_id, tg_client=client)
 
         result: List[str] = []
