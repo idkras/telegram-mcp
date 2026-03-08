@@ -202,6 +202,7 @@ class ChatExporter:
         chat_id: int, 
         limit: int = 1000,
         download_media: bool = True,
+        download_videos: bool = False,
         max_file_size_mb: int = 100,
         output_dir: Path | None = None,
         markdown_dir: Path | None = None,  # ✅ Директория где находится markdown файл (для правильных относительных путей)
@@ -381,18 +382,20 @@ class ChatExporter:
                 if message.media and hasattr(message.media, 'video'):
                     video = message.media.video
                     file_size_mb = video.size / (1024 * 1024) if hasattr(video, 'size') else 0
-                    
-                    if file_size_mb <= max_file_size_mb:
-                        if download_media and output_dir:
-                            video_path = await self._download_video(message, output_dir)
-                            if video_path:
-                                # ✅ Используем метод для вычисления относительного пути
-                                relative_path = self._get_relative_path(video_path, markdown_dir, output_dir)
-                                msg_data["media"] = {
-                                    "type": "video",
-                                    "size_mb": file_size_mb,
-                                    "path": relative_path
-                                }
+
+                    msg_data["media"] = {
+                        "type": "video",
+                        "size_mb": file_size_mb,
+                        "path": None,
+                        "telegram_link": telegram_link,
+                    }
+
+                    if download_videos and file_size_mb <= max_file_size_mb and download_media and output_dir:
+                        video_path = await self._download_video(message, output_dir)
+                        if video_path:
+                            # ✅ Используем метод для вычисления относительного пути
+                            relative_path = self._get_relative_path(video_path, markdown_dir, output_dir)
+                            msg_data["media"]["path"] = relative_path
 
                 # Добавляем сообщение даже если нет текста (только медиа)
                 if message.text or msg_data.get("media") or msg_data.get("files"):
@@ -680,6 +683,9 @@ class ChatExporter:
                         elif media["type"] == "video" and media.get("path"):
                             size_info = f" ({media.get('size_mb', 0):.2f} MB)" if media.get('size_mb') else ""
                             content.append(f"🎥 [Video]({media['path']}){size_info}")
+                        elif media["type"] == "video" and media.get("telegram_link"):
+                            size_info = f" ({media.get('size_mb', 0):.2f} MB)" if media.get('size_mb') else ""
+                            content.append(f"🎥 [Video in Telegram]({media['telegram_link']}){size_info}")
                     
                     # ✅ Добавить ссылки на файлы
                     if msg.get("files"):
