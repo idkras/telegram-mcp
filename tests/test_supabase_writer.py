@@ -243,22 +243,19 @@ class TestSupabaseWriterInit:
 class TestConversationsSQLView:
     """Validate the SQL migration file structure."""
 
-    def test_migration_file_exists(self):
-        path = os.path.join(
+    def _migration_path(self):
+        return os.path.join(
             os.path.dirname(__file__), "..", "..", "..",
-            "heroes_platform", "self-hosted-solutions", "supabase",
-            "supabase", "migrations",
+            "self-hosted-solutions", "supabase", "supabase", "migrations",
             "20260209000001_telegram_conversations_view.sql"
         )
+
+    def test_migration_file_exists(self):
+        path = self._migration_path()
         assert os.path.exists(path), f"Migration file not found at {path}"
 
     def test_migration_contains_required_objects(self):
-        path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "..",
-            "heroes_platform", "self-hosted-solutions", "supabase",
-            "supabase", "migrations",
-            "20260209000001_telegram_conversations_view.sql"
-        )
+        path = self._migration_path()
         with open(path) as f:
             sql = f.read()
 
@@ -276,12 +273,7 @@ class TestConversationsSQLView:
         assert "depth < 50" in sql
 
     def test_migration_depends_on_telegram_messages_raw(self):
-        path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "..",
-            "heroes_platform", "self-hosted-solutions", "supabase",
-            "supabase", "migrations",
-            "20260209000001_telegram_conversations_view.sql"
-        )
+        path = self._migration_path()
         with open(path) as f:
             sql = f.read()
 
