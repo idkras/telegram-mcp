@@ -63,6 +63,7 @@ enable(__file__)
 
 # ПОТОМ импортируем heroes_platform модули
 from heroes_platform.shared.credentials_wrapper import get_service_credentials
+from heroes_platform.shared.logging_utils import add_rotating_file_handler
 from heroes_platform.heroes_telegram_mcp.chat_search_utils import (
     search_chats_by_keyword_impl,
     get_all_chats_list_impl,
@@ -373,8 +374,13 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 log_file_path = os.path.join(script_dir, "mcp_errors.log")
 
 try:
-    file_handler = logging.FileHandler(log_file_path, mode="a")  # Append mode
-    file_handler.setLevel(logging.ERROR)
+    file_handler = add_rotating_file_handler(
+        logger,
+        log_file_path,
+        level=logging.ERROR,
+        max_bytes=5 * 1024 * 1024,
+        backup_count=5,
+    )
 
     # Create formatter and add to handlers
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s - %(message)s - %(filename)s:%(lineno)d")
@@ -383,7 +389,6 @@ try:
 
     # Add handlers to logger
     logger.addHandler(console_handler)
-    logger.addHandler(file_handler)
 
     logger.info(f"Logging initialized to {log_file_path}")
 except Exception as log_error:
@@ -3106,6 +3111,7 @@ if __name__ == "__main__":
             print("Options:")
             print("  --help, -h           Show this help message")
             print("  --version, -v        Show version information")
+            print("  --test               Smoke-check credentials and exit 0/1")
             print("  --list-tools         List available MCP tools")
             print("")
             print("MCP Server provides 73+ tools for Telegram integration.")
@@ -3116,6 +3122,16 @@ if __name__ == "__main__":
             print("FastMCP-based server for Telegram API")
             print("Status: Active")
             sys.exit(0)
+        elif arg == "--test":
+            try:
+                if client is not None:
+                    print("OK")
+                    sys.exit(0)
+                print("Telegram MCP client not initialized", file=sys.stderr)
+                sys.exit(1)
+            except Exception as e:
+                print(f"Telegram MCP test failed: {e}", file=sys.stderr)
+                sys.exit(1)
         elif arg == "--list-tools":
             print("Available Telegram MCP Tools:")
             print("=" * 50)

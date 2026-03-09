@@ -10,8 +10,6 @@
 #   2. Supabase migration applied (telegram_messages_raw table exists)
 #   3. Telegram session string generated
 
-version: '3.8'
-
 services:
   telegram-mcp-laba:
     build:
@@ -19,7 +17,8 @@ services:
       dockerfile: heroes_platform/heroes_telegram_mcp/Dockerfile.laba
     container_name: telegram-mcp-laba
     env_file:
-      - .env.laba
+      - path: .env.laba
+        required: false
     environment:
       - LABA_MODE=true
       - PYTHONPATH=/app

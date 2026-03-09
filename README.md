@@ -81,11 +81,15 @@ chat_info = await get_chat(chat_id)
 {
   "mcpServers": {
     "telegram-mcp": {
-      "command": "python3",
-      "args": ["main.py"],
-      "cwd": "${workspaceFolder}/heroes-platform/telegram-mcp",
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": [
+        "${workspaceFolder}/heroes_platform/shared/credentials_wrapper.py",
+        "telegram",
+        "${workspaceFolder}/.venv/bin/python",
+        "${workspaceFolder}/heroes_platform/heroes_telegram_mcp/main.py"
+      ],
       "env": {
-        "PYTHONPATH": "${workspaceFolder}/heroes-platform/telegram-mcp",
+        "PYTHONPATH": "${workspaceFolder}",
         "TELEGRAM_USER": "lisa"
       }
     }
@@ -94,6 +98,29 @@ chat_info = await get_chat(chat_id)
 ```
 
 ## Использование
+
+### Канонический пакет
+
+- Командный source of truth: `heroes_platform/heroes_telegram_mcp`
+- Legacy compatibility path `heroes_platform/telegram_mcp` сохраняется только для старых ссылок и миграции
+- Для Cursor, health-checks, deployment и teammate setup использовать только `heroes_platform/heroes_telegram_mcp/main.py`
+
+### Origin / upstream contract
+
+- `origin` должен указывать на командный fork
+- `upstream` должен указывать на исходный репозиторий `chigwell/telegram-mcp`
+- Обновление делается так:
+
+```bash
+git -C heroes_platform/heroes_telegram_mcp fetch upstream
+git -C heroes_platform/heroes_telegram_mcp checkout main
+git -C heroes_platform/heroes_telegram_mcp merge --ff-only upstream/main || git -C heroes_platform/heroes_telegram_mcp merge upstream/main
+git -C heroes_platform/heroes_telegram_mcp push origin main
+git add heroes_platform/heroes_telegram_mcp
+git commit -m "chore: update heroes_telegram_mcp submodule ref"
+```
+
+Если в submodule есть наши product-specific изменения, сначала держим их в опубликованной ветке `ik-codex/*` или `feature/*`, потом переносим в `main` командного fork, и только после этого обновляем root gitlink.
 
 ### CLI команды
 - `--help` - Справка
