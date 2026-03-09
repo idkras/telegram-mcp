@@ -1,0 +1,68 @@
+# Telegram MCP Server - Laba Deployment
+# Runs Telegram MCP with Supabase event handlers for real-time message ingestion.
+#
+# Standard: Rick.ai Laba Deployment Standard 5.18
+# Mode: LABA_MODE=true enables Supabase event handlers
+
+FROM python:3.13-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+# Enable Supabase event handlers for real-time message ingestion
+ENV LABA_MODE=true
+
+# Install system dependencies (needed for some Python packages on slim)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy and install Python dependencies
+# Build context is workspace root (set in docker-compose.laba.yml)
+COPY heroes_platform/heroes_telegram_mcp/requirements.txt ./requirements.txt
+COPY heroes_platform/heroes_telegram_mcp/requirements-laba.txt ./requirements-laba.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir -r requirements-laba.txt
+
+# Copy package __init__.py files (required for python -m module execution)
+COPY heroes_platform/__init__.py ./heroes_platform/__init__.py
+
+# Copy shared modules (for imports)
+COPY heroes_platform/shared/ ./heroes_platform/shared/
+
+# Copy telegram MCP package
+COPY heroes_platform/heroes_telegram_mcp/__init__.py ./heroes_platform/heroes_telegram_mcp/__init__.py
+COPY heroes_platform/heroes_telegram_mcp/main.py ./heroes_platform/heroes_telegram_mcp/main.py
+COPY heroes_platform/heroes_telegram_mcp/chat_search_utils.py ./heroes_platform/heroes_telegram_mcp/chat_search_utils.py
+COPY heroes_platform/heroes_telegram_mcp/chat_exporter.py ./heroes_platform/heroes_telegram_mcp/chat_exporter.py
+COPY heroes_platform/heroes_telegram_mcp/supabase_writer.py ./heroes_platform/heroes_telegram_mcp/supabase_writer.py
+COPY heroes_platform/heroes_telegram_mcp/event_handlers.py ./heroes_platform/heroes_telegram_mcp/event_handlers.py
+
+# Create non-root user
+RUN adduser --disabled-password --gecos "" appuser \
+    && chown -R appuser:appuser /app
+USER appuser
+
+# Telegram credentials (provided at runtime via env or secrets)
+ENV TELEGRAM_API_ID=""
+ENV TELEGRAM_API_HASH=""
+ENV TELEGRAM_SESSION_STRING=""
+ENV TELEGRAM_SESSION_NAME="telegram_mcp_session"
+
+# Supabase credentials (provided at runtime)
+ENV SUPABASE_URL="https://supabase.rick.ai"
+ENV SUPABASE_API_KEY=""
+
+# Telegram user for writer
+ENV TELEGRAM_USER="ikrasinsky"
+
+# Set PYTHONPATH so imports work correctly
+ENV PYTHONPATH=/app
+
+# Health check: verify python process is running
+HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
+    CMD pgrep -f "heroes_platform.heroes_telegram_mcp.main" || exit 1
+
+CMD ["python", "-m", "heroes_platform.heroes_telegram_mcp.main"]

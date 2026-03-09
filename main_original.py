@@ -1,9 +1,4 @@
-# COPIED FROM GITHUB REPOSITORY - TYPE CHECKING DISABLED
-# This file was copied from external repository and may have type issues
-# Type checking is disabled for this file to avoid false positives
-# pyright: ignore[all]
-# mypy: ignore-errors
-
+# type: ignore
 import asyncio
 import json
 import logging
@@ -11,30 +6,9 @@ import mimetypes
 import os
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import Enum
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from telethon.tl.types import Message, TotalList, Channel, Chat, User, MessageReplyStoryHeader  # type: ignore
-    # Entity не существует в telethon 1.41.2, используем Union[Channel, Chat, User]
-    Entity = Union[Channel, Chat, User]  # type: ignore
-    from telethon.tl.types import (  # type: ignore
-        InputPeerUser, InputPeerChannel, InputPeerChat, InputPeerEmpty,
-        InputUser, InputUserEmpty, InputUserSelf, InputUserFromMessage,
-        InputChannel, InputChannelEmpty, InputChannelFromMessage,
-        InputNotifyPeer, InputNotifyUsers, InputNotifyChats, InputNotifyBroadcasts,
-        InputDialogPeer, InputDialogPeerFolder,
-        TypeInputPeer, TypeInputUser, TypeInputChannel, TypeInputNotifyPeer,
-        TypeInputDialogPeer, TypeInputPeerNotifySettings, TypeInputContact,
-        MessageMediaEmpty, MessageMediaPhoto, MessageMediaGeo, MessageMediaContact,
-        MessageMediaUnsupported, MessageMediaWebPage, MessageMediaVenue,
-        MessageMediaGame, MessageMediaInvoice, MessageMediaGeoLive,
-        MessageMediaPoll, MessageMediaDice, MessageMediaStory,
-        MessageMediaGiveaway, MessageMediaGiveawayResults, MessageMediaPaidMedia,
-        MessageMediaToDo  # SearchGifsRequest commented out - not available in current telethon version
-    )
+from typing import Any
 
 # Third-party libraries
 import nest_asyncio  # type: ignore
@@ -54,22 +28,6 @@ from telethon.tl.types import (  # type: ignore
     InputChatUploadedPhoto,
     User,
 )
-# Entity не существует в telethon 1.41.2, используем Union[Channel, Chat, User]
-# from telethon.tl.types.base import Entity  # REMOVED: не существует в telethon 1.41.2
-
-# СНАЧАЛА настраиваем импорты
-from heroes_platform.shared.import_setup import enable
-enable(__file__)
-
-# ПОТОМ импортируем heroes_platform модули
-from heroes_platform.shared.credentials_wrapper import get_service_credentials
-from heroes_platform.shared.logging_utils import add_rotating_file_handler
-from heroes_platform.heroes_telegram_mcp.chat_search_utils import (
-    search_chats_by_keyword_impl,
-    get_all_chats_list_impl,
-    analyze_chat_messages_for_bots_impl,
-    json_serializer as chat_search_json_serializer,
-)
 
 
 def json_serializer(obj):
@@ -82,217 +40,61 @@ def json_serializer(obj):
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 
-def safe_iterate_messages(messages: Union["Message", "TotalList", List["Message"], None]) -> List["Message"]:
-    """Safely iterate over messages, handling both single Message and list of Messages."""
-    if not messages:
-        return []
-    if isinstance(messages, list):
-        return messages
-    # If it's a single message, wrap it in a list
-    return [messages]
-
-
-def get_entity_name(entity: Union["Entity", "Channel", "Chat", "User", None]) -> str:
+def get_entity_name(entity: Any) -> str:
     """Safely get the name/title of a Telegram entity."""
     if not entity:
         return "Unknown"
 
     # Check for title (groups, channels)
-    if hasattr(entity, "title") and getattr(entity, "title", None):
-        return getattr(entity, "title", "Unknown")
+    if hasattr(entity, "title") and entity.title:
+        return entity.title
 
     # Check for first_name (users)
-    if hasattr(entity, "first_name") and getattr(entity, "first_name", None):
-        name_parts = [getattr(entity, "first_name", "")]
-        if hasattr(entity, "last_name") and getattr(entity, "last_name", None):
-            name_parts.append(getattr(entity, "last_name", ""))
-        return " ".join(filter(None, name_parts))
+    if hasattr(entity, "first_name") and entity.first_name:
+        name_parts = [entity.first_name]
+        if hasattr(entity, "last_name") and entity.last_name:
+            name_parts.append(entity.last_name)
+        return " ".join(name_parts)
 
     # Check for username
-    if hasattr(entity, "username") and getattr(entity, "username", None):
-        return f"@{getattr(entity, 'username', '')}"
+    if hasattr(entity, "username") and entity.username:
+        return f"@{entity.username}"
 
     # Fallback to ID
     if hasattr(entity, "id"):
-        return f"ID: {getattr(entity, 'id', 'Unknown')}"
+        return f"ID: {entity.id}"
 
     return "Unknown"
 
 
-def safe_get_entity_id(entity: Any) -> Optional[int]:
-    """Safely get the ID of a Telegram entity."""
-    if not entity:
-        return None
-    if hasattr(entity, "id"):
-        return getattr(entity, "id", None)
-    return None
-
-
-def safe_get_entity_attribute(entity: Any, attr_name: str, default: Any = None) -> Any:
-    """Safely get an attribute from a Telegram entity."""
-    if not entity:
-        return default
-    if hasattr(entity, attr_name):
-        return getattr(entity, attr_name, default)
-    return default
-
-
-def ensure_single_entity(entity: Any) -> Any:
-    """Ensure we have a single entity, not a list."""
-    if isinstance(entity, list) and len(entity) > 0:
-        return entity[0]
-    return entity
-
-
-def ensure_entity_list(entity: Any) -> List[Any]:
-    """Ensure we have a list of entities."""
-    if isinstance(entity, list):
-        return entity
-    if entity is None:
-        return []
-    return [entity]
-
-
-def safe_iterate_entities(entities: Any) -> List[Any]:
-    """Safely iterate over entities, handling both single entity and list of entities."""
-    if not entities:
-        return []
-    if isinstance(entities, list):
-        return entities
-    return [entities]
-
-
-def _chat_id_candidates(chat_id: int) -> List[int]:
-    """Build candidate IDs for chat/entity resolution.
-
-    Telegram tools in this file receive chat IDs in different forms:
-    - positive channel/supergroup ID from dialog list (`3558402637`)
-    - peer ID with `-100` prefix (`-1003558402637`)
-    - legacy negative group IDs
-    """
-    candidates: List[int] = [chat_id]
-    text_id = str(chat_id)
-
-    if chat_id > 0:
-        # Convert channel/supergroup id to peer id form.
-        candidates.append(-(1_000_000_000_000 + chat_id))
-    elif text_id.startswith("-100"):
-        # Convert peer id back to plain channel id.
-        try:
-            candidates.append(int(text_id[4:]))
-        except ValueError:
-            pass
-
-    # Keep order while removing duplicates.
-    unique: List[int] = []
-    seen: set[int] = set()
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        unique.append(candidate)
-    return unique
-
-
-async def _ensure_client_connected(tg_client: TelegramClient) -> None:
-    """Ensure Telethon client is connected, handling asyncio event loop changes."""
-    if tg_client.is_connected():
-        return
-    try:
-        await tg_client.start()  # type: ignore
-    except RuntimeError as e:
-        if "event loop" in str(e).lower():
-            # Event loop changed after initial connection — disconnect and reconnect in current loop
-            try:
-                await tg_client.disconnect()
-            except Exception:
-                pass
-            await tg_client.start()  # type: ignore
-        else:
-            raise
-
-
-async def _resolve_chat_entity(chat_id: int, tg_client: Optional[TelegramClient] = None, scan_limit: int = 1000):
-    """Resolve chat entity robustly for positive/peer chat IDs.
-
-    Primary path: try direct `get_entity` for each candidate ID.
-    Fallback path: scan dialogs and match by both `entity.id` and `utils.get_peer_id(entity)`.
-    """
-    active_client = tg_client or client
-    await _ensure_client_connected(active_client)
-
-    candidates = _chat_id_candidates(chat_id)
-    errors: List[str] = []
-
-    for candidate in candidates:
-        try:
-            return await active_client.get_entity(candidate)
-        except RuntimeError as exc:
-            if "event loop" in str(exc).lower():
-                await _ensure_client_connected(active_client)
-                try:
-                    return await active_client.get_entity(candidate)
-                except Exception as retry_exc:  # noqa: BLE001
-                    errors.append(f"{candidate}: {retry_exc}")
-            else:
-                errors.append(f"{candidate}: {exc}")
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"{candidate}: {exc}")
-
-    try:
-        dialogs = await active_client.get_dialogs(limit=scan_limit)
-    except RuntimeError as e:
-        if "event loop" in str(e).lower():
-            await _ensure_client_connected(active_client)
-            dialogs = await active_client.get_dialogs(limit=scan_limit)
-        else:
-            raise
-    for dialog in dialogs:
-        entity = dialog.entity
-        entity_id = safe_get_entity_id(entity)
-        if entity_id is None:
-            continue
-
-        try:
-            peer_id = utils.get_peer_id(entity)
-        except Exception:
-            peer_id = None
-
-        for candidate in candidates:
-            if candidate == entity_id:
-                return entity
-            if peer_id is not None and candidate == peer_id:
-                return entity
-            if candidate < 0 and str(candidate).startswith("-100"):
-                try:
-                    if int(str(candidate)[4:]) == entity_id:
-                        return entity
-                except ValueError:
-                    continue
-
-    raise ValueError(
-        f"Could not resolve chat entity for chat_id={chat_id}. Tried candidates={candidates}. "
-        f"Direct errors: {'; '.join(errors[:3])}"
-    )
-
-
 load_dotenv()
 
+# Configuration validation
 
-credentials = get_service_credentials("telegram")
-TELEGRAM_API_ID = int(credentials.get("TELEGRAM_API_ID", "0"))
-TELEGRAM_API_HASH = credentials.get("TELEGRAM_API_HASH")
-SESSION_STRING = credentials.get("TELEGRAM_SESSION_STRING")
-# Credentials retrieved - logging to stderr to avoid JSON-RPC interference
-print(f"✅ Credentials retrieved from credentials_wrapper", file=sys.stderr)
 
-# Validate credentials
-if not TELEGRAM_API_HASH:
-    raise ValueError("TELEGRAM_API_HASH is required but not provided")
-if TELEGRAM_API_ID == 0:
-    raise ValueError("TELEGRAM_API_ID is required but not provided")
+def validate_telegram_config() -> tuple[int, str, str | None, str | None]:
+    """Validate Telegram configuration and return validated values."""
+    api_id = os.getenv("TELEGRAM_API_ID")
+    api_hash = os.getenv("TELEGRAM_API_HASH")
+    session_name = os.getenv("TELEGRAM_SESSION_NAME")
+    session_string = os.getenv("TELEGRAM_SESSION_STRING")
 
-TELEGRAM_SESSION_NAME = os.getenv("TELEGRAM_SESSION_NAME")
+    if not api_id or not api_hash:
+        raise ValueError("TELEGRAM_API_ID and TELEGRAM_API_HASH must be set in environment variables")
+
+    try:
+        api_id_int = int(api_id)
+    except ValueError:
+        raise ValueError("TELEGRAM_API_ID must be a valid integer")
+
+    if not session_name and not session_string:
+        raise ValueError("Either TELEGRAM_SESSION_NAME or TELEGRAM_SESSION_STRING must be set")
+
+    return api_id_int, api_hash, session_name, session_string
+
+
+# Validate configuration
+TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION_NAME, SESSION_STRING = validate_telegram_config()
 
 mcp = FastMCP("telegram")
 
@@ -301,68 +103,10 @@ if SESSION_STRING:
     client = TelegramClient(StringSession(SESSION_STRING), TELEGRAM_API_ID, TELEGRAM_API_HASH)
 else:
     # Use file-based session
-    client = TelegramClient(TELEGRAM_SESSION_NAME or "telegram_session", TELEGRAM_API_ID, TELEGRAM_API_HASH)
-
-# Optional second client for profile "lisa" (lazy-initialized)
-_lisa_client: Optional[TelegramClient] = None
-
-
-def _get_credentials_for_profile(profile: str) -> Optional[Dict[str, Any]]:
-    """Return credentials for the given profile by temporarily setting TELEGRAM_USER. Used for multi-profile send (e.g. lisa)."""
-    if (profile or "").strip().lower() != "lisa":
-        return None
-    old = os.environ.get("TELEGRAM_USER")
-    try:
-        os.environ["TELEGRAM_USER"] = "lisa"
-        return get_service_credentials("telegram")
-    finally:
-        if old is None:
-            os.environ.pop("TELEGRAM_USER", None)
-        else:
-            os.environ["TELEGRAM_USER"] = old
-
-
-async def _get_client_for_profile(profile: str) -> TelegramClient:
-    """Return the Telegram client for the given profile. 'default'/'ik'/'ikrasinsky' -> main client; 'lisa' -> lazy-created Lisa client."""
-    global _lisa_client
-    normalized = (profile or "default").strip().lower()
-    if normalized in ("", "default", "ik", "ikrasinsky", "ilyakrasinsky"):
-        return client
-    if normalized == "lisa":
-        if _lisa_client is None:
-            creds = _get_credentials_for_profile("lisa")
-            if not creds or not creds.get("TELEGRAM_API_HASH"):
-                raise ValueError("Lisa profile credentials not configured. Check Keychain and credentials_manager (lisa_tg_*).")
-            api_id = int(creds.get("TELEGRAM_API_ID", 0))
-            session_str = creds.get("TELEGRAM_SESSION_STRING")
-            if session_str:
-                _lisa_client = TelegramClient(StringSession(session_str), api_id, creds["TELEGRAM_API_HASH"])
-            else:
-                _lisa_client = TelegramClient("telegram_session_lisa", api_id, creds["TELEGRAM_API_HASH"])
-        return _lisa_client
-    raise ValueError(f"Unknown profile: {profile!r}. Use 'default'/'ik' or 'lisa'.")
-
-
-async def _sent_as_display(tg_client: TelegramClient) -> str:
-    """Return a short 'Sent as: Name (@username)' string for the given client (for visibility in tool response)."""
-    try:
-        if not tg_client.is_connected():
-            await tg_client.start()  # type: ignore
-        me = await tg_client.get_me()
-        if not me:
-            return "unknown"
-        name = getattr(me, "first_name", "") or ""
-        if getattr(me, "last_name", None):
-            name = f"{name} {me.last_name}".strip()
-        username = getattr(me, "username", None)
-        if username:
-            return f"{name or 'User'} (@{username})"
-        return name or "User"
-    except Exception:
-        return "unknown"
+    client = TelegramClient(TELEGRAM_SESSION_NAME, TELEGRAM_API_ID, TELEGRAM_API_HASH)
 
 # Setup robust logging with both file and console output
-logger = logging.getLogger("heroes_telegram_mcp")
+logger = logging.getLogger("telegram_mcp")
 logger.setLevel(logging.ERROR)  # Set to ERROR for production, INFO for debugging
 
 # Create console handler
@@ -374,13 +118,8 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 log_file_path = os.path.join(script_dir, "mcp_errors.log")
 
 try:
-    file_handler = add_rotating_file_handler(
-        logger,
-        log_file_path,
-        level=logging.ERROR,
-        max_bytes=5 * 1024 * 1024,
-        backup_count=5,
-    )
+    file_handler = logging.FileHandler(log_file_path, mode="a")  # Append mode
+    file_handler.setLevel(logging.ERROR)
 
     # Create formatter and add to handlers
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s - %(message)s - %(filename)s:%(lineno)d")
@@ -389,6 +128,7 @@ try:
 
     # Add handlers to logger
     logger.addHandler(console_handler)
+    logger.addHandler(file_handler)
 
     logger.info(f"Logging initialized to {log_file_path}")
 except Exception as log_error:
@@ -456,25 +196,23 @@ def log_and_format_error(
 
 def format_entity(entity) -> dict[str, Any]:
     """Helper function to format entity information consistently."""
-    entity_id = safe_get_entity_id(entity)
-    result: dict[str, Any] = {}
-    result["id"] = entity_id if entity_id is not None else 0
+    result = {"id": entity.id}
 
     if hasattr(entity, "title"):
         result["name"] = get_entity_name(entity)
         result["type"] = "group" if isinstance(entity, Chat) else "channel"
     elif hasattr(entity, "first_name"):
         name_parts = []
-        if getattr(entity, "first_name", None):
-            name_parts.append(getattr(entity, "first_name", ""))
-        if hasattr(entity, "last_name") and getattr(entity, "last_name", None):
-            name_parts.append(getattr(entity, "last_name", ""))
+        if entity.first_name:
+            name_parts.append(entity.first_name)
+        if hasattr(entity, "last_name") and entity.last_name:
+            name_parts.append(entity.last_name)
         result["name"] = " ".join(name_parts)
         result["type"] = "user"
-        if hasattr(entity, "username") and getattr(entity, "username", None):
-            result["username"] = getattr(entity, "username", "")
-        if hasattr(entity, "phone") and safe_get_entity_attribute(entity, "phone"):
-            result["phone"] = safe_get_entity_attribute(entity, "phone", "")
+        if hasattr(entity, "username") and entity.username:
+            result["username"] = entity.username
+        if hasattr(entity, "phone") and entity.phone:
+            result["phone"] = entity.phone
 
     return result
 
@@ -499,12 +237,12 @@ def format_message(message) -> dict[str, Any]:
 
 def get_sender_name(message) -> str:
     """Helper function to get sender name from a message."""
-    if not hasattr(message, 'sender') or not message.sender:
+    if not message.sender:
         return "Unknown"
 
     # Check for group/channel title first
-    if hasattr(message.sender, "title") and safe_get_entity_attribute(message.sender, "title"):
-        return get_entity_name(message.sender)
+    if hasattr(message.sender, "title") and message.sender.title:
+        return message.sender.title
     elif hasattr(message.sender, "first_name"):
         # User sender
         first_name = getattr(message.sender, "first_name", "") or ""
@@ -524,10 +262,6 @@ async def get_chats(page: int = 1, page_size: int = 20) -> str:
         page_size: Number of chats per page.
     """
     try:
-        # Проверяем подключение
-        if not client.is_connected():
-            await client.start()  # type: ignore
-
         dialogs = await client.get_dialogs()
         start = (page - 1) * page_size
         end = start + page_size
@@ -555,17 +289,17 @@ async def get_messages(chat_id: int, page: int = 1, page_size: int = 20) -> str:
         page_size: Number of messages per page.
     """
     try:
-        entity = await _resolve_chat_entity(chat_id, tg_client=client)
+        entity = await client.get_entity(chat_id)
         offset = (page - 1) * page_size
         messages = await client.get_messages(entity, limit=page_size, add_offset=offset)
         if not messages:
             return "No messages found for this page."
         lines = []
-        for msg in safe_iterate_messages(messages):
+        for msg in messages:
             sender_name = get_sender_name(msg)
             reply_info = ""
-            if msg.reply_to and hasattr(msg.reply_to, 'reply_to_msg_id'):
-                reply_info = f" | reply to {getattr(msg.reply_to, 'reply_to_msg_id', 'unknown')}"
+            if msg.reply_to and msg.reply_to.reply_to_msg_id:
+                reply_info = f" | reply to {msg.reply_to.reply_to_msg_id}"
             lines.append(f"ID: {msg.id} | {sender_name} | Date: {msg.date}{reply_info} | Message: {msg.message}")
         return "\n".join(lines)
     except Exception as e:
@@ -573,23 +307,17 @@ async def get_messages(chat_id: int, page: int = 1, page_size: int = 20) -> str:
 
 
 @mcp.tool()
-async def send_message(chat_id: int, message: str, profile: str = "default") -> str:
+async def send_message(chat_id: int, message: str) -> str:
     """
     Send a message to a specific chat.
     Args:
         chat_id: The ID of the chat.
         message: The message content to send.
-        profile: Telegram account to send as: "default" or "ik"/"ikrasinsky" for main account, "lisa" for Lisa (@hello_liza_rickai). Response includes "Sent as: Name (@username)" so the active user is visible.
     """
     try:
-        c = await _get_client_for_profile(profile)
-        if not c.is_connected():
-            await c.start()  # type: ignore
-        entity = await _resolve_chat_entity(chat_id, tg_client=c)
-        single_entity = ensure_single_entity(entity)
-        await c.send_message(single_entity, message)
-        sent_as = await _sent_as_display(c)
-        return f"Message sent successfully. Sent as: {sent_as}"
+        entity = await client.get_entity(chat_id)
+        await client.send_message(entity, message)
+        return "Message sent successfully."
     except Exception as e:
         return log_and_format_error("send_message", e, chat_id=chat_id)
 
@@ -601,7 +329,7 @@ async def list_contacts() -> str:
     """
     try:
         result = await client(functions.contacts.GetContactsRequest(hash=0))
-        users = safe_get_entity_attribute(result, "users", [])
+        users = result.users
         if not users:
             return "No contacts found."
         lines = []
@@ -629,7 +357,7 @@ async def search_contacts(query: str) -> str:
     """
     try:
         result = await client(functions.contacts.SearchRequest(q=query, limit=50))
-        users = safe_get_entity_attribute(result, "users", [])
+        users = result.users
         if not users:
             return f"No contacts found matching '{query}'."
         lines = []
@@ -681,7 +409,7 @@ async def list_messages(
         to_date: Filter messages until this date (format: YYYY-MM-DD).
     """
     try:
-        entity = await _resolve_chat_entity(chat_id, tg_client=client)
+        entity = await client.get_entity(chat_id)
 
         # Parse date filters if provided
         from_date_obj = None
@@ -690,16 +418,16 @@ async def list_messages(
         if from_date:
             try:
                 from_date_obj = datetime.strptime(from_date, "%Y-%m-%d")
-                # Make it timezone aware by adding timezone.utc timezone info
+                # Make it timezone aware by adding UTC timezone info
                 # Use datetime.timezone.utc for Python 3.9+ or import timezone directly for 3.13+
                 try:
                     # For Python 3.9+
 
-                    from_date_obj = from_date_obj.replace(tzinfo=timezone.utc)
+                    from_date_obj = from_date_obj.replace(tzinfo=UTC)
                 except AttributeError:
                     # For Python 3.13+
 
-                    from_date_obj = from_date_obj.replace(tzinfo=timezone.utc)
+                    from_date_obj = from_date_obj.replace(tzinfo=UTC)
             except ValueError:
                 return "Invalid from_date format. Use YYYY-MM-DD."
 
@@ -711,10 +439,10 @@ async def list_messages(
                 # Add timezone info
                 try:
 
-                    to_date_obj = to_date_obj.replace(tzinfo=timezone.utc)
+                    to_date_obj = to_date_obj.replace(tzinfo=UTC)
                 except AttributeError:
 
-                    to_date_obj = to_date_obj.replace(tzinfo=timezone.utc)
+                    to_date_obj = to_date_obj.replace(tzinfo=UTC)
             except ValueError:
                 return "Invalid to_date format. Use YYYY-MM-DD."
 
@@ -728,10 +456,10 @@ async def list_messages(
         # Apply date filters (Telethon doesn't support date filtering in get_messages directly)
         if from_date_obj or to_date_obj:
             filtered_messages = []
-            for msg in safe_iterate_messages(messages):
-                if from_date_obj and hasattr(msg, 'date') and msg.date and msg.date < from_date_obj:
+            for msg in messages:
+                if from_date_obj and msg.date < from_date_obj:
                     continue
-                if to_date_obj and hasattr(msg, 'date') and msg.date and msg.date > to_date_obj:
+                if to_date_obj and msg.date > to_date_obj:
                     continue
                 filtered_messages.append(msg)
             messages = filtered_messages
@@ -740,12 +468,12 @@ async def list_messages(
             return "No messages found matching the criteria."
 
         lines = []
-        for msg in safe_iterate_messages(messages):
+        for msg in messages:
             sender_name = get_sender_name(msg)
             message_text = msg.message or "[Media/No text]"
             reply_info = ""
-            if msg.reply_to and hasattr(msg.reply_to, 'reply_to_msg_id'):
-                reply_info = f" | reply to {getattr(msg.reply_to, 'reply_to_msg_id', 'unknown')}"
+            if msg.reply_to and msg.reply_to.reply_to_msg_id:
+                reply_info = f" | reply to {msg.reply_to.reply_to_msg_id}"
 
             lines.append(f"ID: {msg.id} | {sender_name} | Date: {msg.date}{reply_info} | Message: {message_text}")
 
@@ -788,18 +516,18 @@ async def list_chats(chat_type: str | None = None, limit: int = 20) -> str:
             # Format chat info
             chat_info = f"Chat ID: {entity.id}"
 
-            if hasattr(entity, "title") and safe_get_entity_attribute(entity, "title"):
-                chat_info += f", Title: {get_entity_name(entity)}"
-            elif hasattr(entity, "first_name") and getattr(entity, "first_name", None):
-                name = f"{getattr(entity, 'first_name', '')}"
-                if hasattr(entity, "last_name") and getattr(entity, "last_name", None):
-                    name += f" {getattr(entity, 'last_name', '')}"
+            if hasattr(entity, "title"):
+                chat_info += f", Title: {entity.title}"
+            elif hasattr(entity, "first_name"):
+                name = f"{entity.first_name}"
+                if hasattr(entity, "last_name") and entity.last_name:
+                    name += f" {entity.last_name}"
                 chat_info += f", Name: {name}"
 
             chat_info += f", Type: {current_type}"
 
-            if hasattr(entity, "username") and getattr(entity, "username", None):
-                chat_info += f", Username: @{getattr(entity, 'username', '')}"
+            if hasattr(entity, "username") and entity.username:
+                chat_info += f", Username: @{entity.username}"
 
             # Add unread count if available
             if hasattr(dialog, "unread_count") and dialog.unread_count > 0:
@@ -824,94 +552,25 @@ async def get_chat(chat_id: int) -> str:
         chat_id: The ID of the chat.
     """
     try:
-        await _ensure_client_connected(client)
-        entity = await _resolve_chat_entity(chat_id, tg_client=client)
+        entity = await client.get_entity(chat_id)
 
-        result: List[str] = []
-        result.append(f"ID: {getattr(entity, 'id', 'Unknown')}")
+        result = []
+        result.append(f"ID: {entity.id}")
 
         is_channel = isinstance(entity, Channel)
         is_chat = isinstance(entity, Chat)
         is_user = isinstance(entity, User)
 
         if hasattr(entity, "title"):
-            result.append(f"Title: {get_entity_name(entity)}")
+            result.append(f"Title: {entity.title}")
             chat_type = "Channel" if is_channel and getattr(entity, "broadcast", False) else "Group"
             if is_channel and getattr(entity, "megagroup", False):
                 chat_type = "Supergroup"
             elif is_chat:
                 chat_type = "Group (Basic)"
             result.append(f"Type: {chat_type}")
-
-            # Добавить метаданные чата
-            try:
-                # Получить админов
-                admins = await client.get_participants(entity, filter=ChannelParticipantsAdmins())
-                admins_list = []
-                for admin in admins:
-                    name = f"{getattr(admin, 'first_name', '')} {getattr(admin, 'last_name', '')}".strip()
-                    username = (
-                        f"@{getattr(admin, 'username', '')}"
-                        if hasattr(admin, "username") and getattr(admin, "username", None)
-                        else "Нет username"
-                    )
-                    admins_list.append(f"{name} {username}")
-                result.append(f"Admins: {', '.join(admins_list) if admins_list else 'Нет админов'}")
-
-                # Получить владельца (первый админ с правами)
-                owner = "Неизвестно"
-                for admin in admins:
-                    if hasattr(admin, "admin_rights") and admin.admin_rights and admin.admin_rights.other:
-                        name = f"{getattr(admin, 'first_name', '')} {getattr(admin, 'last_name', '')}".strip()
-                        username = (
-                            f"@{getattr(admin, 'username', '')}"
-                            if hasattr(admin, "username") and getattr(admin, "username", None)
-                            else "Нет username"
-                        )
-                        owner = f"{name} {username}"
-                        break
-                result.append(f"Owner: {owner}")
-
-                # Получить настройки истории
-                try:
-                    full_chat = await client.get_entity(entity)
-                    if hasattr(full_chat, "history_available"):
-                        history_available = safe_get_entity_attribute(full_chat, "history_available", False)
-                        history_status = "visible" if history_available else "hidden"
-                        result.append(f"Chat History: {history_status}")
-                    else:
-                        result.append("Chat History: Неизвестно")
-                except Exception:
-                    result.append("Chat History: Неизвестно")
-
-                # Получить участников
-                try:
-                    participants = await client.get_participants(entity, limit=100)
-                    result.append(f"Participants Count: {len(participants)}")
-                    # Показать первых 10 участников
-                    participants_preview = participants[:10]
-                    participants_list = []
-                    for participant in participants_preview:
-                        name = (
-                            f"{getattr(participant, 'first_name', '')} {getattr(participant, 'last_name', '')}".strip()
-                        )
-                        username = (
-                            f"@{getattr(participant, 'username', '')}"
-                            if hasattr(participant, "username") and getattr(participant, "username", None)
-                            else "Нет username"
-                        )
-                        participants_list.append(f"{name} {username}")
-                    result.append(f"Participants: {', '.join(participants_list)}")
-                    if len(participants) > 10:
-                        result.append(f"... и еще {len(participants) - 10} участников")
-                except Exception:
-                    result.append("Participants: Ошибка получения")
-
-            except Exception as e:
-                result.append(f"Metadata Error: {e}")
-
-            if hasattr(entity, "username") and getattr(entity, "username", None):
-                result.append(f"Username: @{getattr(entity, 'username', '')}")
+            if hasattr(entity, "username") and entity.username:
+                result.append(f"Username: @{entity.username}")
 
             # Fetch participants count reliably
             try:
@@ -921,13 +580,13 @@ async def get_chat(chat_id: int) -> str:
                 result.append(f"Participants: Error fetching ({pe})")
 
         elif is_user:
-            name = f"{getattr(entity, 'first_name', '')}"
-            if getattr(entity, "last_name", None):
-                name += f" {getattr(entity, 'last_name', '')}"
+            name = f"{entity.first_name}"
+            if entity.last_name:
+                name += f" {entity.last_name}"
             result.append(f"Name: {name}")
             result.append("Type: User")
-            if getattr(entity, "username", None):
-                result.append(f"Username: @{getattr(entity, 'username', '')}")
+            if entity.username:
+                result.append(f"Username: @{entity.username}")
             if entity.phone:
                 result.append(f"Phone: {entity.phone}")
             result.append(f"Bot: {'Yes' if entity.bot else 'No'}")
@@ -973,7 +632,7 @@ async def get_direct_chat_by_contact(contact_query: str) -> str:
     try:
         # Fetch all contacts using the correct Telethon method
         result = await client(functions.contacts.GetContactsRequest(hash=0))
-        contacts = safe_get_entity_attribute(result, "users", [])
+        contacts = result.users
         found_contacts = []
         for contact in contacts:
             if not contact:
@@ -998,15 +657,13 @@ async def get_direct_chat_by_contact(contact_query: str) -> str:
                 if isinstance(dialog.entity, User) and dialog.entity.id == contact.id:
                     chat_info = f"Chat ID: {dialog.entity.id}, Contact: {contact_name}"
                     if getattr(contact, "username", ""):
-                        chat_info += f", Username: @{getattr(contact, 'username', '')}"
+                        chat_info += f", Username: @{contact.username}"
                     if dialog.unread_count:
                         chat_info += f", Unread: {dialog.unread_count}"
                     results.append(chat_info)
                     break
         if not results:
-            found_names = ", ".join(
-                [f"{getattr(c, 'first_name', '')} {getattr(c, 'last_name', '')}".strip() for c in found_contacts]
-            )
+            found_names = ", ".join([f"{c.first_name} {c.last_name}".strip() for c in found_contacts])
             return f"Found contacts: {found_names}, but no direct chats were found with them."
         return "\n".join(results)
     except Exception as e:
@@ -1045,11 +702,10 @@ async def get_contact_chats(contact_id: int) -> str:
 
         # Look for common groups/channels
         try:
-            # Note: get_common_chats is deprecated, using alternative approach
-            common = await client.get_dialogs()
+            common = await client.get_common_chats(contact)
             for chat in common:
                 chat_type = "Channel" if getattr(chat, "broadcast", False) else "Group"
-                chat_info = f"Chat ID: {chat.id}, Title: {get_entity_name(chat)}, Type: {chat_type}"
+                chat_info = f"Chat ID: {chat.id}, Title: {chat.title}, Type: {chat_type}"
                 results.append(chat_info)
         except Exception:
             results.append("Could not retrieve common groups.")
@@ -1086,7 +742,7 @@ async def get_last_interaction(contact_id: int) -> str:
 
         results = [f"Last interactions with {contact_name} (ID: {contact_id}):"]
 
-        for msg in safe_iterate_messages(messages):
+        for msg in messages:
             sender = "You" if msg.out else contact_name
             message_text = msg.message or "[Media/No text]"
             results.append(f"Date: {msg.date}, From: {sender}, Message: {message_text}")
@@ -1107,7 +763,7 @@ async def get_message_context(chat_id: int, message_id: int, context_size: int =
         context_size: Number of messages before and after to include.
     """
     try:
-        chat = await _resolve_chat_entity(chat_id, tg_client=client)
+        chat = await client.get_entity(chat_id)
         # Get messages around the specified message
         messages_before = await client.get_messages(chat, limit=context_size, max_id=message_id)
         central_message = await client.get_messages(chat, ids=message_id)
@@ -1120,25 +776,25 @@ async def get_message_context(chat_id: int, message_id: int, context_size: int =
         if not central_message:
             return f"Message with ID {message_id} not found in chat {chat_id}."
         # Combine messages in chronological order
-        all_messages = safe_iterate_messages(messages_before) + safe_iterate_messages(central_message) + safe_iterate_messages(messages_after)
+        all_messages = list(messages_before) + list(central_message) + list(messages_after)
         all_messages.sort(key=lambda m: m.id)
         results = [f"Context for message {message_id} in chat {chat_id}:"]
-        for msg in safe_iterate_messages(all_messages):
+        for msg in all_messages:
             sender_name = get_sender_name(msg)
             highlight = " [THIS MESSAGE]" if msg.id == message_id else ""
 
             # Check if this message is a reply and get the replied message
             reply_content = ""
-            if msg.reply_to and hasattr(msg.reply_to, 'reply_to_msg_id'):
+            if msg.reply_to and msg.reply_to.reply_to_msg_id:
                 try:
-                    replied_msg = await client.get_messages(chat, ids=getattr(msg.reply_to, 'reply_to_msg_id', None))
+                    replied_msg = await client.get_messages(chat, ids=msg.reply_to.reply_to_msg_id)
                     if replied_msg:
                         replied_sender = "Unknown"
-                        if hasattr(replied_msg, 'sender') and replied_msg.sender:
+                        if replied_msg.sender:
                             replied_sender = getattr(replied_msg.sender, "first_name", "") or getattr(
                                 replied_msg.sender, "title", "Unknown"
                             )
-                        reply_content = f" | reply to {getattr(msg.reply_to, 'reply_to_msg_id', 'unknown')}\n  → Replied message: [{replied_sender}] {getattr(replied_msg, 'message', '[Media/No text]') or '[Media/No text]'}"
+                        reply_content = f" | reply to {msg.reply_to.reply_to_msg_id}\n  → Replied message: [{replied_sender}] {replied_msg.message or '[Media/No text]'}"
                 except Exception:
                     reply_content = f" | reply to {msg.reply_to.reply_to_msg_id} (original message not found)"
 
@@ -1167,13 +823,12 @@ async def add_contact(phone: str, first_name: str, last_name: str = "") -> str:
     """
     try:
         # Try to import the required types first
-        # InputPhoneContact not available in current telethon version
-        # from telethon.tl.types import InputPhoneContact  # type: ignore
+        from telethon.tl.types import InputPhoneContact
 
         result = await client(
             functions.contacts.ImportContactsRequest(
                 contacts=[
-                    functions.contacts.InputPhoneContact(
+                    InputPhoneContact(
                         client_id=0,
                         phone=phone,
                         first_name=first_name,
@@ -1222,12 +877,7 @@ async def delete_contact(user_id: int) -> str:
     """
     try:
         user = await client.get_entity(user_id)
-        # Convert Entity to TypeInputUser
-        if hasattr(user, 'id'):
-            input_user = InputUser(user_id=user.id, access_hash=user.access_hash)
-        else:
-            input_user = InputUserEmpty()
-        await client(functions.contacts.DeleteContactsRequest(id=[input_user]))
+        await client(functions.contacts.DeleteContactsRequest(id=[user]))
         return f"Contact with user ID {user_id} deleted."
     except Exception as e:
         return log_and_format_error("delete_contact", e, user_id=user_id)
@@ -1269,8 +919,6 @@ async def get_me() -> str:
     Get your own user information.
     """
     try:
-        if not client.is_connected():
-            await client.start()  # type: ignore
         me = await client.get_me()
         return json.dumps(format_entity(me), indent=2)
     except Exception as e:
@@ -1306,11 +954,9 @@ async def create_group(title: str, user_ids: list) -> str:
             result = await client(functions.messages.CreateChatRequest(users=users, title=title))
 
             # Check what type of response we got
-            chats = safe_get_entity_attribute(result, "chats", [])
-            if chats:
-                created_chat = chats[0]
-                chat_id = safe_get_entity_id(created_chat)
-                return f"Group created with ID: {chat_id}"
+            if hasattr(result, "chats") and result.chats:
+                created_chat = result.chats[0]
+                return f"Group created with ID: {created_chat.id}"
             elif hasattr(result, "chat") and result.chat:
                 return f"Group created with ID: {result.chat.id}"
             elif hasattr(result, "chat_id"):
@@ -1321,7 +967,7 @@ async def create_group(title: str, user_ids: list) -> str:
                 await asyncio.sleep(1)  # Give Telegram a moment to register the new group
                 dialogs = await client.get_dialogs(limit=5)  # Get recent dialogs
                 for dialog in dialogs:
-                    if get_entity_name(dialog) == title:
+                    if dialog.title == title:
                         return f"Group created with ID: {dialog.id}"
 
                 # If we still can't find it, at least return success
@@ -1361,13 +1007,12 @@ async def invite_to_group(group_id: int, user_ids: list) -> str:
             result = await client(functions.channels.InviteToChannelRequest(channel=entity, users=users_to_add))
 
             invited_count = 0
-            users = safe_get_entity_attribute(result, "users", [])
-            if users:
-                invited_count = len(users)
+            if hasattr(result, "users") and result.users:
+                invited_count = len(result.users)
             elif hasattr(result, "count"):
                 invited_count = result.count
 
-            return f"Successfully invited {invited_count} users to {get_entity_name(entity)}"
+            return f"Successfully invited {invited_count} users to {entity.title}"
         except telethon.errors.rpcerrorlist.UserNotMutualContactError:
             return "Error: Cannot invite users who are not mutual contacts. Please ensure the users are in your contacts and have added you back."
         except telethon.errors.rpcerrorlist.UserPrivacyRestrictedError:
@@ -1377,7 +1022,7 @@ async def invite_to_group(group_id: int, user_ids: list) -> str:
 
     except Exception as e:
         logger.error(
-            f"heroes_telegram_mcp invite_to_group failed (group_id={group_id}, user_ids={user_ids})",
+            f"telegram_mcp invite_to_group failed (group_id={group_id}, user_ids={user_ids})",
             exc_info=True,
         )
         return log_and_format_error("invite_to_group", e, group_id=group_id, user_ids=user_ids)
@@ -1392,7 +1037,7 @@ async def leave_chat(chat_id: int) -> str:
         chat_id: The chat ID to leave.
     """
     try:
-        entity = await _resolve_chat_entity(chat_id, tg_client=client)
+        entity = await client.get_entity(chat_id)
 
         # Check the entity type carefully
         if isinstance(entity, Channel):
@@ -1487,7 +1132,7 @@ async def send_file(chat_id: int, file_path: str, caption: str | None = None) ->
             return f"File not found: {file_path}"
         if not os.access(file_path, os.R_OK):
             return f"File is not readable: {file_path}"
-        entity = await _resolve_chat_entity(chat_id, tg_client=client)
+        entity = await client.get_entity(chat_id)
         await client.send_file(entity, file_path, caption=caption)
         return f"File sent to chat {chat_id}."
     except Exception as e:
@@ -1504,9 +1149,9 @@ async def download_media(chat_id: int, message_id: int, file_path: str) -> str:
         file_path: Absolute path to save the downloaded file (must be writable).
     """
     try:
-        entity = await _resolve_chat_entity(chat_id, tg_client=client)
+        entity = await client.get_entity(chat_id)
         msg = await client.get_messages(entity, ids=message_id)
-        if not msg or not hasattr(msg, 'media') or not msg.media:
+        if not msg or not msg.media:
             return "No media found in the specified message."
         # Check if directory is writable
         dir_path = os.path.dirname(file_path) or "."
@@ -1576,7 +1221,7 @@ async def get_privacy_settings() -> str:
     """
     try:
         # Import needed types directly
-        from telethon.tl.types import InputPrivacyKeyStatusTimestamp  # type: ignore
+        from telethon.tl.types import InputPrivacyKeyStatusTimestamp
 
         try:
             settings = await client(functions.account.GetPrivacyRequest(key=InputPrivacyKeyStatusTimestamp()))
@@ -1607,7 +1252,7 @@ async def set_privacy_settings(
     """
     try:
         # Import needed types
-        from telethon.tl.types import (  # type: ignore
+        from telethon.tl.types import (
             InputPrivacyKeyPhoneNumber,
             InputPrivacyKeyProfilePhoto,
             InputPrivacyKeyStatusTimestamp,
@@ -1712,7 +1357,7 @@ async def export_contacts() -> str:
     """
     try:
         result = await client(functions.contacts.GetContactsRequest(hash=0))
-        users = safe_get_entity_attribute(result, "users", [])
+        users = result.users
         return json.dumps([format_entity(u) for u in users], indent=2)
     except Exception as e:
         return log_and_format_error("export_contacts", e)
@@ -1725,8 +1370,7 @@ async def get_blocked_users() -> str:
     """
     try:
         result = await client(functions.contacts.GetBlockedRequest(offset=0, limit=100))
-        users = safe_get_entity_attribute(result, "users", [])
-        return json.dumps([format_entity(u) for u in users], indent=2)
+        return json.dumps([format_entity(u) for u in result.users], indent=2)
     except Exception as e:
         return log_and_format_error("get_blocked_users", e)
 
@@ -1738,11 +1382,7 @@ async def create_channel(title: str, about: str = "", megagroup: bool = False) -
     """
     try:
         result = await client(functions.channels.CreateChannelRequest(title=title, about=about, megagroup=megagroup))
-        chats = safe_get_entity_attribute(result, "chats", [])
-        if chats:
-            chat_id = safe_get_entity_id(chats[0])
-            return f"Channel '{title}' created with ID: {chat_id}"
-        return f"Channel '{title}' created"
+        return f"Channel '{title}' created with ID: {result.chats[0].id}"
     except Exception as e:
         return log_and_format_error("create_channel", e, title=title, about=about, megagroup=megagroup)
 
@@ -1753,7 +1393,7 @@ async def edit_chat_title(chat_id: int, title: str) -> str:
     Edit the title of a chat, group, or channel.
     """
     try:
-        entity = await _resolve_chat_entity(chat_id, tg_client=client)
+        entity = await client.get_entity(chat_id)
         if isinstance(entity, Channel):
             await client(functions.channels.EditTitleRequest(channel=entity, title=title))
         elif isinstance(entity, Chat):
@@ -1777,7 +1417,7 @@ async def edit_chat_photo(chat_id: int, file_path: str) -> str:
         if not os.access(file_path, os.R_OK):
             return f"Photo file not readable: {file_path}"
 
-        entity = await _resolve_chat_entity(chat_id, tg_client=client)
+        entity = await client.get_entity(chat_id)
         uploaded_file = await client.upload_file(file_path)
 
         if isinstance(entity, Channel):
@@ -1803,7 +1443,7 @@ async def delete_chat_photo(chat_id: int) -> str:
     Delete the photo of a chat, group, or channel.
     """
     try:
-        entity = await _resolve_chat_entity(chat_id, tg_client=client)
+        entity = await client.get_entity(chat_id)
         if isinstance(entity, Channel):
             # Use InputChatPhotoEmpty for channels/supergroups
             await client(functions.channels.EditPhotoRequest(channel=entity, photo=InputChatPhotoEmpty()))
@@ -1820,36 +1460,18 @@ async def delete_chat_photo(chat_id: int) -> str:
 
 
 @mcp.tool()
-async def promote_admin(
-    group_id: int, user_id: int, rights: dict[Any, Any] | str | None = None
-) -> str:
+async def promote_admin(group_id: int, user_id: int, rights: dict[Any, Any] | None = None) -> str:
     """
     Promote a user to admin in a group/channel.
 
     Args:
         group_id: ID of the group/channel
         user_id: User ID to promote
-        rights: Admin rights to give (optional). Dict or JSON string. Include "add_admins": true to allow adding other admins.
+        rights: Admin rights to give (optional)
     """
     try:
         chat = await client.get_entity(group_id)
         user = await client.get_entity(user_id)
-
-        # Parse rights if passed as JSON string (e.g. from MCP client)
-        if isinstance(rights, str):
-            s = rights.strip()
-            if not s:
-                rights = None
-            else:
-                try:
-                    rights = json.loads(s)
-                except json.JSONDecodeError as e:
-                    # Fix common typo: {}"key" -> {"key" (extra brace at start)
-                    if "Extra data" in str(e) and s.startswith('{}"'):
-                        s = "{" + s[2:]
-                        rights = json.loads(s)
-                    else:
-                        raise
 
         # Set default admin rights if not provided
         if not rights:
@@ -1885,7 +1507,7 @@ async def promote_admin(
             await client(
                 functions.channels.EditAdminRequest(channel=chat, user_id=user, admin_rights=admin_rights, rank="Admin")
             )
-            return f"Successfully promoted user {user_id} to admin in {get_entity_name(chat)}"
+            return f"Successfully promoted user {user_id} to admin in {chat.title}"
         except telethon.errors.rpcerrorlist.UserNotMutualContactError:
             return "Error: Cannot promote users who are not mutual contacts. Please ensure the user is in your contacts and has added you back."
         except Exception as e:
@@ -1893,7 +1515,7 @@ async def promote_admin(
 
     except Exception as e:
         logger.error(
-            f"heroes_telegram_mcp promote_admin failed (group_id={group_id}, user_id={user_id})",
+            f"telegram_mcp promote_admin failed (group_id={group_id}, user_id={user_id})",
             exc_info=True,
         )
         return log_and_format_error("promote_admin", e, group_id=group_id, user_id=user_id)
@@ -1931,7 +1553,7 @@ async def demote_admin(group_id: int, user_id: int) -> str:
             await client(
                 functions.channels.EditAdminRequest(channel=chat, user_id=user, admin_rights=admin_rights, rank="")
             )
-            return f"Successfully demoted user {user_id} from admin in {get_entity_name(chat)}"
+            return f"Successfully demoted user {user_id} from admin in {chat.title}"
         except telethon.errors.rpcerrorlist.UserNotMutualContactError:
             return "Error: Cannot modify admin status of users who are not mutual contacts. Please ensure the user is in your contacts and has added you back."
         except Exception as e:
@@ -1939,7 +1561,7 @@ async def demote_admin(group_id: int, user_id: int) -> str:
 
     except Exception as e:
         logger.error(
-            f"heroes_telegram_mcp demote_admin failed (group_id={group_id}, user_id={user_id})",
+            f"telegram_mcp demote_admin failed (group_id={group_id}, user_id={user_id})",
             exc_info=True,
         )
         return log_and_format_error("demote_admin", e, group_id=group_id, user_id=user_id)
@@ -1955,7 +1577,7 @@ async def ban_user(chat_id: int, user_id: int) -> str:
         user_id: User ID to ban
     """
     try:
-        chat = await _resolve_chat_entity(chat_id, tg_client=client)
+        chat = await client.get_entity(chat_id)
         user = await client.get_entity(user_id)
 
         # Create banned rights (all restrictions enabled)
@@ -1979,7 +1601,7 @@ async def ban_user(chat_id: int, user_id: int) -> str:
             await client(
                 functions.channels.EditBannedRequest(channel=chat, participant=user, banned_rights=banned_rights)
             )
-            return f"User {user_id} banned from chat {get_entity_name(chat)} (ID: {chat_id})."
+            return f"User {user_id} banned from chat {chat.title} (ID: {chat_id})."
         except telethon.errors.rpcerrorlist.UserNotMutualContactError:
             return "Error: Cannot ban users who are not mutual contacts. Please ensure the user is in your contacts and has added you back."
         except Exception as e:
@@ -1999,7 +1621,7 @@ async def unban_user(chat_id: int, user_id: int) -> str:
         user_id: User ID to unban
     """
     try:
-        chat = await _resolve_chat_entity(chat_id, tg_client=client)
+        chat = await client.get_entity(chat_id)
         user = await client.get_entity(user_id)
 
         # Create unbanned rights (no restrictions)
@@ -2023,7 +1645,7 @@ async def unban_user(chat_id: int, user_id: int) -> str:
             await client(
                 functions.channels.EditBannedRequest(channel=chat, participant=user, banned_rights=unbanned_rights)
             )
-            return f"User {user_id} unbanned from chat {get_entity_name(chat)} (ID: {chat_id})."
+            return f"User {user_id} unbanned from chat {chat.title} (ID: {chat_id})."
         except telethon.errors.rpcerrorlist.UserNotMutualContactError:
             return "Error: Cannot modify status of users who are not mutual contacts. Please ensure the user is in your contacts and has added you back."
         except Exception as e:
@@ -2075,11 +1697,11 @@ async def get_invite_link(chat_id: int) -> str:
     Get the invite link for a group or channel.
     """
     try:
-        entity = await _resolve_chat_entity(chat_id, tg_client=client)
+        entity = await client.get_entity(chat_id)
 
         # Try using ExportChatInviteRequest first
         try:
-            from telethon.tl import functions  # type: ignore
+            from telethon.tl import functions
 
             result = await client(functions.messages.ExportChatInviteRequest(peer=entity))
             return result.link
@@ -2100,10 +1722,7 @@ async def get_invite_link(chat_id: int) -> str:
         # Last resort: Try directly fetching chat info
         try:
             if isinstance(entity, (Chat, Channel)):
-                # Import functions locally to ensure it's available
-                from telethon import functions  # type: ignore
-
-                full_chat = await client(functions.messages.GetFullChatRequest(chat_id=entity.id))  # type: ignore
+                full_chat = await client(functions.messages.GetFullChatRequest(chat_id=entity.id))
                 if hasattr(full_chat, "full_chat") and hasattr(full_chat.full_chat, "invite_link"):
                     return full_chat.full_chat.invite_link or "No invite link available."
         except Exception as e3:
@@ -2145,9 +1764,8 @@ async def join_chat_by_link(link: str) -> str:
         # Join the chat using the hash
         try:
             result = await client(functions.messages.ImportChatInviteRequest(hash=hash_part))
-            chats = safe_get_entity_attribute(result, "chats", [])
-            if result and chats:
-                chat_title = safe_get_entity_attribute(chats[0], "title", "Unknown Chat")
+            if result and hasattr(result, "chats") and result.chats:
+                chat_title = getattr(result.chats[0], "title", "Unknown Chat")
                 return f"Successfully joined chat: {chat_title}"
             return "Joined chat via invite hash."
         except Exception as join_err:
@@ -2175,11 +1793,11 @@ async def export_chat_invite(chat_id: int) -> str:
     Export a chat invite link.
     """
     try:
-        entity = await _resolve_chat_entity(chat_id, tg_client=client)
+        entity = await client.get_entity(chat_id)
 
         # Try using ExportChatInviteRequest first
         try:
-            from telethon.tl import functions  # type: ignore
+            from telethon.tl import functions
 
             result = await client(functions.messages.ExportChatInviteRequest(peer=entity))
             return result.link
@@ -2228,9 +1846,8 @@ async def import_chat_invite(hash: str) -> str:
         # Join the chat using the hash
         try:
             result = await client(functions.messages.ImportChatInviteRequest(hash=hash))
-            chats = safe_get_entity_attribute(result, "chats", [])
-            if result and chats:
-                chat_title = safe_get_entity_attribute(chats[0], "title", "Unknown Chat")
+            if result and hasattr(result, "chats") and result.chats:
+                chat_title = getattr(result.chats[0], "title", "Unknown Chat")
                 return f"Successfully joined chat: {chat_title}"
             return "Joined chat via invite hash."
         except Exception as join_err:
@@ -2270,7 +1887,7 @@ async def send_voice(chat_id: int, file_path: str) -> str:
             mime and (mime == "audio/ogg" or file_path.lower().endswith(".ogg") or file_path.lower().endswith(".opus"))
         ):
             return "Voice file must be .ogg or .opus format."
-        entity = await _resolve_chat_entity(chat_id, tg_client=client)
+        entity = await client.get_entity(chat_id)
         await client.send_file(entity, file_path, voice_note=True)
         return f"Voice message sent to chat {chat_id}."
     except Exception as e:
@@ -2283,8 +1900,8 @@ async def forward_message(from_chat_id: int, message_id: int, to_chat_id: int) -
     Forward a message from one chat to another.
     """
     try:
-        from_entity = await _resolve_chat_entity(from_chat_id, tg_client=client)
-        to_entity = await _resolve_chat_entity(to_chat_id, tg_client=client)
+        from_entity = await client.get_entity(from_chat_id)
+        to_entity = await client.get_entity(to_chat_id)
         await client.forward_messages(to_entity, message_id, from_entity)
         return f"Message {message_id} forwarded from {from_chat_id} to {to_chat_id}."
     except Exception as e:
@@ -2303,7 +1920,7 @@ async def edit_message(chat_id: int, message_id: int, new_text: str) -> str:
     Edit a message you sent.
     """
     try:
-        entity = await _resolve_chat_entity(chat_id, tg_client=client)
+        entity = await client.get_entity(chat_id)
         await client.edit_message(entity, message_id, new_text)
         return f"Message {message_id} edited."
     except Exception as e:
@@ -2316,7 +1933,7 @@ async def delete_message(chat_id: int, message_id: int) -> str:
     Delete a message by ID.
     """
     try:
-        entity = await _resolve_chat_entity(chat_id, tg_client=client)
+        entity = await client.get_entity(chat_id)
         await client.delete_messages(entity, message_id)
         return f"Message {message_id} deleted."
     except Exception as e:
@@ -2329,7 +1946,7 @@ async def pin_message(chat_id: int, message_id: int) -> str:
     Pin a message in a chat.
     """
     try:
-        entity = await _resolve_chat_entity(chat_id, tg_client=client)
+        entity = await client.get_entity(chat_id)
         await client.pin_message(entity, message_id)
         return f"Message {message_id} pinned in chat {chat_id}."
     except Exception as e:
@@ -2342,7 +1959,7 @@ async def unpin_message(chat_id: int, message_id: int) -> str:
     Unpin a message in a chat.
     """
     try:
-        entity = await _resolve_chat_entity(chat_id, tg_client=client)
+        entity = await client.get_entity(chat_id)
         await client.unpin_message(entity, message_id)
         return f"Message {message_id} unpinned in chat {chat_id}."
     except Exception as e:
@@ -2355,7 +1972,7 @@ async def mark_as_read(chat_id: int) -> str:
     Mark all messages as read in a chat.
     """
     try:
-        entity = await _resolve_chat_entity(chat_id, tg_client=client)
+        entity = await client.get_entity(chat_id)
         await client.send_read_acknowledge(entity)
         return f"Marked all messages as read in chat {chat_id}."
     except Exception as e:
@@ -2363,23 +1980,14 @@ async def mark_as_read(chat_id: int) -> str:
 
 
 @mcp.tool()
-async def reply_to_message(chat_id: int, message_id: int, text: str, profile: str = "default") -> str:
+async def reply_to_message(chat_id: int, message_id: int, text: str) -> str:
     """
     Reply to a specific message in a chat.
-    Args:
-        chat_id: The ID of the chat.
-        message_id: The message ID to reply to.
-        text: The reply text.
-        profile: Telegram account to send as: "default"/"ik" for main account, "lisa" for Lisa. Response includes "Sent as: Name (@username)".
     """
     try:
-        c = await _get_client_for_profile(profile)
-        if not c.is_connected():
-            await c.start()  # type: ignore
-        entity = await _resolve_chat_entity(chat_id, tg_client=c)
-        await c.send_message(entity, text, reply_to=message_id)
-        sent_as = await _sent_as_display(c)
-        return f"Replied to message {message_id} in chat {chat_id}. Sent as: {sent_as}"
+        entity = await client.get_entity(chat_id)
+        await client.send_message(entity, text, reply_to=message_id)
+        return f"Replied to message {message_id} in chat {chat_id}."
     except Exception as e:
         return log_and_format_error("reply_to_message", e, chat_id=chat_id, message_id=message_id, text=text)
 
@@ -2393,9 +2001,9 @@ async def get_media_info(chat_id: int, message_id: int) -> str:
         message_id: The message ID.
     """
     try:
-        entity = await _resolve_chat_entity(chat_id, tg_client=client)
+        entity = await client.get_entity(chat_id)
         msg = await client.get_messages(entity, ids=message_id)
-        if not msg or not hasattr(msg, 'media') or not msg.media:
+        if not msg or not msg.media:
             return "No media found in the specified message."
         return str(msg.media)
     except Exception as e:
@@ -2409,8 +2017,7 @@ async def search_public_chats(query: str) -> str:
     """
     try:
         result = await client(functions.contacts.SearchRequest(q=query, limit=20))
-        users = safe_get_entity_attribute(result, "users", [])
-        return json.dumps([format_entity(u) for u in users], indent=2)
+        return json.dumps([format_entity(u) for u in result.users], indent=2)
     except Exception as e:
         return log_and_format_error("search_public_chats", e, query=query)
 
@@ -2421,14 +2028,14 @@ async def search_messages(chat_id: int, query: str, limit: int = 20) -> str:
     Search for messages in a chat by text.
     """
     try:
-        entity = await _resolve_chat_entity(chat_id, tg_client=client)
+        entity = await client.get_entity(chat_id)
         messages = await client.get_messages(entity, limit=limit, search=query)
         lines = []
-        for msg in safe_iterate_messages(messages):
+        for msg in messages:
             sender_name = get_sender_name(msg)
             reply_info = ""
-            if msg.reply_to and hasattr(msg.reply_to, 'reply_to_msg_id'):
-                reply_info = f" | reply to {getattr(msg.reply_to, 'reply_to_msg_id', 'unknown')}"
+            if msg.reply_to and msg.reply_to.reply_to_msg_id:
+                reply_info = f" | reply to {msg.reply_to.reply_to_msg_id}"
             lines.append(f"ID: {msg.id} | {sender_name} | Date: {msg.date}{reply_info} | Message: {msg.message}")
         return "\n".join(lines)
     except Exception as e:
@@ -2453,9 +2060,9 @@ async def mute_chat(chat_id: int) -> str:
     Mute notifications for a chat.
     """
     try:
-        from telethon.tl.types import InputPeerNotifySettings  # type: ignore
+        from telethon.tl.types import InputPeerNotifySettings
 
-        peer = await _resolve_chat_entity(chat_id, tg_client=client)
+        peer = await client.get_entity(chat_id)
         await client(
             functions.account.UpdateNotifySettingsRequest(
                 peer=peer, settings=InputPeerNotifySettings(mute_until=2**31 - 1)
@@ -2491,9 +2098,9 @@ async def unmute_chat(chat_id: int) -> str:
     Unmute notifications for a chat.
     """
     try:
-        from telethon.tl.types import InputPeerNotifySettings  # type: ignore
+        from telethon.tl.types import InputPeerNotifySettings
 
-        peer = await _resolve_chat_entity(chat_id, tg_client=client)
+        peer = await client.get_entity(chat_id)
         await client(
             functions.account.UpdateNotifySettingsRequest(peer=peer, settings=InputPeerNotifySettings(mute_until=0))
         )
@@ -2527,7 +2134,7 @@ async def archive_chat(chat_id: int) -> str:
     Archive a chat.
     """
     try:
-        await client(functions.messages.ToggleDialogPinRequest(peer=await _resolve_chat_entity(chat_id, tg_client=client), pinned=True))
+        await client(functions.messages.ToggleDialogPinRequest(peer=await client.get_entity(chat_id), pinned=True))
         return f"Chat {chat_id} archived."
     except Exception as e:
         return log_and_format_error("archive_chat", e, chat_id=chat_id)
@@ -2539,7 +2146,7 @@ async def unarchive_chat(chat_id: int) -> str:
     Unarchive a chat.
     """
     try:
-        await client(functions.messages.ToggleDialogPinRequest(peer=await _resolve_chat_entity(chat_id, tg_client=client), pinned=False))
+        await client(functions.messages.ToggleDialogPinRequest(peer=await client.get_entity(chat_id), pinned=False))
         return f"Chat {chat_id} unarchived."
     except Exception as e:
         return log_and_format_error("unarchive_chat", e, chat_id=chat_id)
@@ -2552,7 +2159,7 @@ async def get_sticker_sets() -> str:
     """
     try:
         result = await client(functions.messages.GetAllStickersRequest(hash=0))
-        return json.dumps([get_entity_name(s) for s in result.sets], indent=2)
+        return json.dumps([s.title for s in result.sets], indent=2)
     except Exception as e:
         return log_and_format_error("get_sticker_sets", e)
 
@@ -2572,7 +2179,7 @@ async def send_sticker(chat_id: int, file_path: str) -> str:
             return f"Sticker file is not readable: {file_path}"
         if not file_path.lower().endswith(".webp"):
             return "Sticker file must be a .webp file."
-        entity = await _resolve_chat_entity(chat_id, tg_client=client)
+        entity = await client.get_entity(chat_id)
         await client.send_file(entity, file_path, force_document=False)
         return f"Sticker sent to chat {chat_id}."
     except Exception as e:
@@ -2597,7 +2204,7 @@ async def get_gif_search(query: str, limit: int = 10) -> str:
         except (AttributeError, ImportError):
             # Fallback approach: Use SearchRequest with GIF filter
             try:
-                from telethon.tl.types import InputMessagesFilterGif  # type: ignore
+                from telethon.tl.types import InputMessagesFilterGif
 
                 result = await client(
                     functions.messages.SearchRequest(
@@ -2618,7 +2225,7 @@ async def get_gif_search(query: str, limit: int = 10) -> str:
                     return "[]"
                 # Extract document IDs from any messages with media
                 gif_ids = []
-                for msg in safe_iterate_messages(result.messages):
+                for msg in result.messages:
                     if hasattr(msg, "media") and msg.media and hasattr(msg.media, "document"):
                         gif_ids.append(msg.media.document.id)
                 return json.dumps(gif_ids, default=json_serializer)
@@ -2641,7 +2248,7 @@ async def send_gif(chat_id: int, gif_id: int) -> str:
     try:
         if not isinstance(gif_id, int):
             return "gif_id must be a Telegram document ID (integer), not a file path. Use get_gif_search to find IDs."
-        entity = await _resolve_chat_entity(chat_id, tg_client=client)
+        entity = await client.get_entity(chat_id)
         await client.send_file(entity, gif_id)
         return f"GIF sent to chat {chat_id}."
     except Exception as e:
@@ -2669,8 +2276,8 @@ async def get_bot_info(bot_username: str) -> str:
             info = {
                 "bot_info": {
                     "id": entity.id,
-                    "username": getattr(entity, "username", ""),
-                    "first_name": getattr(entity, "first_name", ""),
+                    "username": entity.username,
+                    "first_name": entity.first_name,
                     "last_name": getattr(entity, "last_name", ""),
                     "is_bot": getattr(entity, "bot", False),
                     "verified": getattr(entity, "verified", False),
@@ -2683,59 +2290,6 @@ async def get_bot_info(bot_username: str) -> str:
     except Exception as e:
         logger.exception(f"get_bot_info failed (bot_username={bot_username})")
         return log_and_format_error("get_bot_info", e, bot_username=bot_username)
-
-
-@mcp.tool()
-async def get_user_full_info(user_id: int | None = None, username: str | None = None) -> str:
-    """
-    Get full user profile information including bio/about.
-    
-    Args:
-        user_id: User ID (if known)
-        username: Username (e.g., "username" without @)
-    
-    Returns:
-        JSON string with full user information including bio/about
-    """
-    try:
-        if not client.is_connected():
-            await client.start()  # type: ignore
-        
-        # Validate that at least one parameter is provided
-        if not user_id and not username:
-            return json.dumps({"error": "Either user_id or username must be provided"}, ensure_ascii=False)
-        
-        # Get user entity
-        if username:
-            entity = await client.get_entity(username)
-        elif user_id:
-            entity = await client.get_entity(user_id)
-        else:
-            return json.dumps({"error": "Failed to get user entity"}, ensure_ascii=False)
-        
-        # Get full user info
-        result = await client(functions.users.GetFullUserRequest(id=entity))
-        
-        # Extract user info
-        user_info = {
-            "id": entity.id,
-            "first_name": getattr(entity, "first_name", ""),
-            "last_name": getattr(entity, "last_name", ""),
-            "username": getattr(entity, "username", None),
-            "phone": getattr(entity, "phone", None),
-            "is_bot": getattr(entity, "bot", False),
-            "verified": getattr(entity, "verified", False),
-            "about": None,  # Will be filled from result
-        }
-        
-        # Get bio/about from full user
-        if hasattr(result, "full_user") and hasattr(result.full_user, "about"):
-            user_info["about"] = result.full_user.about
-        
-        return json.dumps(user_info, indent=2, ensure_ascii=False)
-    except Exception as e:
-        logger.exception(f"get_user_full_info failed (user_id={user_id}, username={username})")
-        return log_and_format_error("get_user_full_info", e, user_id=user_id, username=username)
 
 
 @mcp.tool()
@@ -2756,13 +2310,11 @@ async def set_bot_commands(bot_username: str, commands: list) -> str:
             return "Error: This function can only be used by bot accounts. Your current Telegram account is a regular user account, not a bot."
 
         # Import required types
-        from telethon.tl.functions.bots import SetBotCommandsRequest  # type: ignore
-        from telethon.tl.types import BotCommand, BotCommandScopeDefault  # type: ignore
+        from telethon.tl.functions.bots import SetBotCommandsRequest
+        from telethon.tl.types import BotCommand, BotCommandScopeDefault
 
         # Create BotCommand objects from the command dictionaries
-        bot_commands: list[BotCommand] = [
-            BotCommand(command=c["command"], description=c["description"]) for c in commands
-        ]
+        bot_commands = [BotCommand(command=c["command"], description=c["description"]) for c in commands]
 
         # Get the bot entity
         await client.get_entity(bot_username)
@@ -2791,14 +2343,14 @@ async def get_history(chat_id: int, limit: int = 100) -> str:
     Get full chat history (up to limit).
     """
     try:
-        entity = await _resolve_chat_entity(chat_id, tg_client=client)
+        entity = await client.get_entity(chat_id)
         messages = await client.get_messages(entity, limit=limit)
         lines = []
-        for msg in safe_iterate_messages(messages):
+        for msg in messages:
             sender_name = get_sender_name(msg)
             reply_info = ""
-            if msg.reply_to and hasattr(msg.reply_to, 'reply_to_msg_id'):
-                reply_info = f" | reply to {getattr(msg.reply_to, 'reply_to_msg_id', 'unknown')}"
+            if msg.reply_to and msg.reply_to.reply_to_msg_id:
+                reply_info = f" | reply to {msg.reply_to.reply_to_msg_id}"
             lines.append(f"ID: {msg.id} | {sender_name} | Date: {msg.date}{reply_info} | Message: {msg.message}")
         return "\n".join(lines)
     except Exception as e:
@@ -2859,121 +2411,22 @@ async def get_recent_actions(chat_id: int) -> str:
 
 
 @mcp.tool()
-async def get_chat_metadata(chat_id: int) -> str:
-    """
-    Get comprehensive metadata for a chat including admins, owner, history settings, and participants.
-
-    Args:
-        chat_id: ID of the chat to get metadata for
-    """
-    try:
-        # Проверяем подключение
-        if not client.is_connected():
-            await client.start()  # type: ignore
-
-        entity = await _resolve_chat_entity(chat_id, tg_client=client)
-
-        result: dict[str, Any] = {
-            "chat_id": chat_id,
-            "title": getattr(entity, "title", "Unknown"),
-            "type": type(entity).__name__,
-            "admins": [],
-            "owner": {"name": "Неизвестно", "username": "Нет username", "id": 0},
-            "history_visible": False,
-            "participants_count": 0,
-            "participants": [],
-        }
-
-        # Получить админов
-        try:
-            admins = await client.get_participants(entity, filter=ChannelParticipantsAdmins())
-            for admin in admins:
-                if isinstance(result["admins"], list):
-                    result["admins"].append(
-                        {
-                            "name": f"{getattr(admin, 'first_name', '')} {getattr(admin, 'last_name', '')}".strip(),
-                            "username": (
-                                f"@{getattr(admin, 'username', '')}"
-                                if hasattr(admin, "username") and getattr(admin, "username", None)
-                                else "Нет username"
-                            ),
-                            "id": admin.id,
-                        }
-                    )
-        except Exception as e:
-            result["admins"] = [{"error": str(e)}]
-
-        # Получить владельца
-        try:
-            admins = await client.get_participants(entity, filter=ChannelParticipantsAdmins())
-            for admin in admins:
-                if hasattr(admin, "admin_rights") and admin.admin_rights and admin.admin_rights.other:
-                    result["owner"] = {
-                        "name": f"{getattr(admin, 'first_name', '')} {getattr(admin, 'last_name', '')}".strip(),
-                        "username": (
-                            f"@{getattr(admin, 'username', '')}"
-                            if hasattr(admin, "username") and getattr(admin, "username", None)
-                            else "Нет username"
-                        ),
-                        "id": admin.id,
-                    }
-                    break
-        except Exception as e:
-            result["owner"] = {"error": str(e)}
-
-        # Получить настройки истории
-        try:
-            full_chat = await client.get_entity(entity)
-            if hasattr(full_chat, "history_available"):
-                result["history_visible"] = safe_get_entity_attribute(full_chat, "history_available", False)
-        except Exception:
-            pass
-
-        # Получить участников
-        try:
-            participants = await client.get_participants(entity, limit=100)
-            result["participants_count"] = len(participants)
-            for participant in participants[:10]:  # Первые 10 участников
-                if isinstance(result["participants"], list):
-                    result["participants"].append(
-                        {
-                            "name": f"{getattr(participant, 'first_name', '')} {getattr(participant, 'last_name', '')}".strip(),
-                            "username": (
-                                f"@{getattr(participant, 'username', '')}"
-                                if hasattr(participant, "username") and getattr(participant, "username", None)
-                                else "Нет username"
-                            ),
-                            "id": participant.id,
-                        }
-                    )
-        except Exception as e:
-            result["participants"] = [{"error": str(e)}]
-
-        return json.dumps(result, ensure_ascii=False, indent=2)
-
-    except Exception as e:
-        return json.dumps({"error": str(e)}, ensure_ascii=False, indent=2)
-
-
-@mcp.tool()
 async def get_pinned_messages(chat_id: int) -> str:
     """
     Get all pinned messages in a chat.
     """
     try:
-        entity = await _resolve_chat_entity(chat_id, tg_client=client)
+        entity = await client.get_entity(chat_id)
         # Use correct filter based on Telethon version
         try:
             # Try newer Telethon approach
-            from telethon.tl.types import InputMessagesFilterPinned  # type: ignore
+            from telethon.tl.types import InputMessagesFilterPinned
 
             messages = await client.get_messages(entity, filter=InputMessagesFilterPinned())
         except (ImportError, AttributeError):
             # Fallback - try without filter and manually filter pinned
             all_messages = await client.get_messages(entity, limit=50)
-            messages = []
-            if all_messages is not None:
-                messages = [m for m in all_messages if getattr(m, "pinned", False)]
+            messages = [m for m in all_messages if getattr(m, "pinned", False)]
 
         if not messages:
             return "No pinned messages found in this chat."
@@ -2982,8 +2435,8 @@ async def get_pinned_messages(chat_id: int) -> str:
         for msg in safe_iterate_messages(messages):
             sender_name = get_sender_name(msg)
             reply_info = ""
-            if msg.reply_to and hasattr(msg.reply_to, 'reply_to_msg_id'):
-                reply_info = f" | reply to {getattr(msg.reply_to, 'reply_to_msg_id', 'unknown')}"
+            if msg.reply_to and msg.reply_to.reply_to_msg_id:
+                reply_info = f" | reply to {msg.reply_to.reply_to_msg_id}"
             lines.append(
                 f"ID: {msg.id} | {sender_name} | Date: {msg.date}{reply_info} | Message: {msg.message or '[Media/No text]'}"
             )
@@ -2994,102 +2447,16 @@ async def get_pinned_messages(chat_id: int) -> str:
         return log_and_format_error("get_pinned_messages", e, chat_id=chat_id)
 
 
-@mcp.tool()
-async def search_chats_by_keyword(keyword: str, chat_type: str | None = None, limit: int | None = None) -> str:
-    """
-    Search chats by keyword in title (case-insensitive).
-    
-    Universal method for finding chats by any keyword.
-    
-    Args:
-        keyword: Keyword to search for in chat titles
-        chat_type: Filter by chat type ('user', 'group', 'channel', or None for all)
-        limit: Maximum number of chats to return (None for all)
-    
-    Returns:
-        JSON string with list of matching chats
-    """
-    try:
-        if not client.is_connected():
-            await client.start()  # type: ignore
-        
-        result = await search_chats_by_keyword_impl(client, keyword, chat_type, limit)
-        return json.dumps(result, indent=2, ensure_ascii=False, default=chat_search_json_serializer)
-    except Exception as e:
-        logger.exception(f"search_chats_by_keyword failed (keyword={keyword})")
-        return log_and_format_error("search_chats_by_keyword", e, keyword=keyword, chat_type=chat_type, limit=limit)
-
-
-@mcp.tool()
-async def get_all_chats_list(chat_type: str | None = None, limit: int | None = None) -> str:
-    """
-    Get all chats with optional filtering by type.
-    
-    Universal method for getting all chats with pagination support.
-    
-    Args:
-        chat_type: Filter by chat type ('user', 'group', 'channel', or None for all)
-        limit: Maximum number of chats to return (None for all)
-    
-    Returns:
-        JSON string with list of all chats
-    """
-    try:
-        if not client.is_connected():
-            await client.start()  # type: ignore
-        
-        result = await get_all_chats_list_impl(client, chat_type, limit)
-        return json.dumps(result, indent=2, ensure_ascii=False, default=chat_search_json_serializer)
-    except Exception as e:
-        logger.exception(f"get_all_chats_list failed")
-        return log_and_format_error("get_all_chats_list", e, chat_type=chat_type, limit=limit)
-
-
-@mcp.tool()
-async def analyze_chat_messages_for_bots(chat_id: int, message_limit: int = 100) -> str:
-    """
-    Analyze chat messages to determine if chat contains only bot messages or has client messages.
-    
-    Universal method for analyzing chat message sources.
-    
-    Args:
-        chat_id: The ID of the chat to analyze
-        message_limit: Maximum number of messages to analyze (default: 100)
-    
-    Returns:
-        JSON string with analysis results
-    """
-    try:
-        if not client.is_connected():
-            await client.start()  # type: ignore
-        
-        result = await analyze_chat_messages_for_bots_impl(client, chat_id, message_limit)
-        return json.dumps(result, indent=2, ensure_ascii=False, default=chat_search_json_serializer)
-    except Exception as e:
-        logger.exception(f"analyze_chat_messages_for_bots failed (chat_id={chat_id})")
-        return log_and_format_error("analyze_chat_messages_for_bots", e, chat_id=chat_id, message_limit=message_limit)
-
-
 if __name__ == "__main__":
     nest_asyncio.apply()
 
     async def main() -> None:
         try:
             # Start the Telethon client non-interactively
-            print("Starting Telegram client...", file=sys.stderr)
-            await client.start()  # type: ignore
+            print("Starting Telegram client...")
+            await client.start()
 
-            # Register Supabase event handlers when running on laba
-            if os.getenv("LABA_MODE") == "true":
-                try:
-                    from heroes_platform.heroes_telegram_mcp.event_handlers import (
-                        register_event_handlers,
-                    )
-                    register_event_handlers(client)
-                except Exception as eh_err:
-                    print(f"⚠️ Failed to register event handlers: {eh_err}", file=sys.stderr)
-
-            print("Telegram client started. Running MCP server...", file=sys.stderr)
+            print("Telegram client started. Running MCP server...")
             # Use the asynchronous entrypoint instead of mcp.run()
             await mcp.run_stdio_async()
         except Exception as e:
@@ -3099,61 +2466,6 @@ if __name__ == "__main__":
                     "Database lock detected. Please ensure no other instances are running.",
                     file=sys.stderr,
                 )
-            sys.exit(1)
-
-    # Проверяем аргументы командной строки перед запуском
-    if len(sys.argv) > 1:
-        arg = sys.argv[1]
-        if arg in {"--help", "-h"}:
-            print("Telegram MCP Server v1.0.0")
-            print("Usage: python main.py [options]")
-            print("")
-            print("Options:")
-            print("  --help, -h           Show this help message")
-            print("  --version, -v        Show version information")
-            print("  --test               Smoke-check credentials and exit 0/1")
-            print("  --list-tools         List available MCP tools")
-            print("")
-            print("MCP Server provides 73+ tools for Telegram integration.")
-            print("Use --list-tools to see all available tools.")
-            sys.exit(0)
-        elif arg in {"--version", "-v"}:
-            print("Telegram MCP Server v1.0.0")
-            print("FastMCP-based server for Telegram API")
-            print("Status: Active")
-            sys.exit(0)
-        elif arg == "--test":
-            try:
-                if client is not None:
-                    print("OK")
-                    sys.exit(0)
-                print("Telegram MCP client not initialized", file=sys.stderr)
-                sys.exit(1)
-            except Exception as e:
-                print(f"Telegram MCP test failed: {e}", file=sys.stderr)
-                sys.exit(1)
-        elif arg == "--list-tools":
-            print("Available Telegram MCP Tools:")
-            print("=" * 50)
-            print("1.  get_chats")
-            print("2.  get_messages")
-            print("3.  get_contact_ids")
-            print("4.  get_chat")
-            print("5.  get_chat_metadata")
-            print("6.  get_direct_chat_by_contact")
-            print("7.  get_contact_chats")
-            print("8.  get_last_interaction")
-            print("9.  get_message_context")
-            print("10. get_me")
-            print("11. get_participants")
-            print("12. get_admins")
-            print("... and 60+ more tools")
-            print("=" * 50)
-            print("Total: 73+ tools available")
-            sys.exit(0)
-        elif arg.startswith("--"):
-            print(f"Unknown option: {arg}")
-            print("Use --help for available options")
             sys.exit(1)
 
     asyncio.run(main())
