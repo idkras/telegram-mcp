@@ -18,22 +18,51 @@ from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from telethon.tl.types import Message, TotalList, Channel, Chat, User, MessageReplyStoryHeader  # type: ignore
+
     # Entity не существует в telethon 1.41.2, используем Union[Channel, Chat, User]
     Entity = Union[Channel, Chat, User]  # type: ignore
     from telethon.tl.types import (  # type: ignore
-        InputPeerUser, InputPeerChannel, InputPeerChat, InputPeerEmpty,
-        InputUser, InputUserEmpty, InputUserSelf, InputUserFromMessage,
-        InputChannel, InputChannelEmpty, InputChannelFromMessage,
-        InputNotifyPeer, InputNotifyUsers, InputNotifyChats, InputNotifyBroadcasts,
-        InputDialogPeer, InputDialogPeerFolder,
-        TypeInputPeer, TypeInputUser, TypeInputChannel, TypeInputNotifyPeer,
-        TypeInputDialogPeer, TypeInputPeerNotifySettings, TypeInputContact,
-        MessageMediaEmpty, MessageMediaPhoto, MessageMediaGeo, MessageMediaContact,
-        MessageMediaUnsupported, MessageMediaWebPage, MessageMediaVenue,
-        MessageMediaGame, MessageMediaInvoice, MessageMediaGeoLive,
-        MessageMediaPoll, MessageMediaDice, MessageMediaStory,
-        MessageMediaGiveaway, MessageMediaGiveawayResults, MessageMediaPaidMedia,
-        MessageMediaToDo  # SearchGifsRequest commented out - not available in current telethon version
+        InputPeerUser,
+        InputPeerChannel,
+        InputPeerChat,
+        InputPeerEmpty,
+        InputUser,
+        InputUserEmpty,
+        InputUserSelf,
+        InputUserFromMessage,
+        InputChannel,
+        InputChannelEmpty,
+        InputChannelFromMessage,
+        InputNotifyPeer,
+        InputNotifyUsers,
+        InputNotifyChats,
+        InputNotifyBroadcasts,
+        InputDialogPeer,
+        InputDialogPeerFolder,
+        TypeInputPeer,
+        TypeInputUser,
+        TypeInputChannel,
+        TypeInputNotifyPeer,
+        TypeInputDialogPeer,
+        TypeInputPeerNotifySettings,
+        TypeInputContact,
+        MessageMediaEmpty,
+        MessageMediaPhoto,
+        MessageMediaGeo,
+        MessageMediaContact,
+        MessageMediaUnsupported,
+        MessageMediaWebPage,
+        MessageMediaVenue,
+        MessageMediaGame,
+        MessageMediaInvoice,
+        MessageMediaGeoLive,
+        MessageMediaPoll,
+        MessageMediaDice,
+        MessageMediaStory,
+        MessageMediaGiveaway,
+        MessageMediaGiveawayResults,
+        MessageMediaPaidMedia,
+        MessageMediaToDo,  # SearchGifsRequest commented out - not available in current telethon version
     )
 
 # Third-party libraries
@@ -54,11 +83,13 @@ from telethon.tl.types import (  # type: ignore
     InputChatUploadedPhoto,
     User,
 )
+
 # Entity не существует в telethon 1.41.2, используем Union[Channel, Chat, User]
 # from telethon.tl.types.base import Entity  # REMOVED: не существует в telethon 1.41.2
 
 # СНАЧАЛА настраиваем импорты
 from heroes_platform.shared.import_setup import enable
+
 enable(__file__)
 
 # ПОТОМ импортируем heroes_platform модули
@@ -279,6 +310,54 @@ async def _resolve_chat_entity(chat_id: int, tg_client: Optional[TelegramClient]
 load_dotenv()
 
 
+def _exit_for_cli_probe() -> None:
+    """Handle lightweight CLI probes before credentials/session bootstrap."""
+    if len(sys.argv) <= 1:
+        return
+
+    arg = sys.argv[1]
+    if arg in {"--help", "-h"}:
+        print("Telegram MCP Server v1.0.0")
+        print("Usage: python main.py [options]")
+        print("")
+        print("Options:")
+        print("  --help, -h           Show this help message")
+        print("  --version, -v        Show version information")
+        print("  --test               Smoke-check credentials and exit 0/1")
+        print("  --list-tools         List available MCP tools")
+        print("")
+        print("MCP Server provides 73+ tools for Telegram integration.")
+        print("Use --list-tools to see all available tools.")
+        sys.exit(0)
+    if arg in {"--version", "-v"}:
+        print("Telegram MCP Server v1.0.0")
+        print("FastMCP-based server for Telegram API")
+        print("Status: Active")
+        sys.exit(0)
+    if arg == "--list-tools":
+        print("Available Telegram MCP Tools:")
+        print("=" * 50)
+        print("1.  get_chats")
+        print("2.  get_messages")
+        print("3.  get_contact_ids")
+        print("4.  get_chat")
+        print("5.  get_chat_metadata")
+        print("6.  get_direct_chat_by_contact")
+        print("7.  get_contact_chats")
+        print("8.  get_last_interaction")
+        print("9.  get_message_context")
+        print("10. get_me")
+        print("11. get_participants")
+        print("12. get_admins")
+        print("... and 60+ more tools")
+        print("=" * 50)
+        print("Total: 73+ tools available")
+        sys.exit(0)
+
+
+_exit_for_cli_probe()
+
+
 credentials = get_service_credentials("telegram")
 TELEGRAM_API_ID = int(credentials.get("TELEGRAM_API_ID", "0"))
 TELEGRAM_API_HASH = credentials.get("TELEGRAM_API_HASH")
@@ -332,7 +411,9 @@ async def _get_client_for_profile(profile: str) -> TelegramClient:
         if _lisa_client is None:
             creds = _get_credentials_for_profile("lisa")
             if not creds or not creds.get("TELEGRAM_API_HASH"):
-                raise ValueError("Lisa profile credentials not configured. Check Keychain and credentials_manager (lisa_tg_*).")
+                raise ValueError(
+                    "Lisa profile credentials not configured. Check Keychain and credentials_manager (lisa_tg_*)."
+                )
             api_id = int(creds.get("TELEGRAM_API_ID", 0))
             session_str = creds.get("TELEGRAM_SESSION_STRING")
             if session_str:
@@ -360,6 +441,7 @@ async def _sent_as_display(tg_client: TelegramClient) -> str:
         return name or "User"
     except Exception:
         return "unknown"
+
 
 # Setup robust logging with both file and console output
 logger = logging.getLogger("heroes_telegram_mcp")
@@ -499,7 +581,7 @@ def format_message(message) -> dict[str, Any]:
 
 def get_sender_name(message) -> str:
     """Helper function to get sender name from a message."""
-    if not hasattr(message, 'sender') or not message.sender:
+    if not hasattr(message, "sender") or not message.sender:
         return "Unknown"
 
     # Check for group/channel title first
@@ -564,7 +646,7 @@ async def get_messages(chat_id: int, page: int = 1, page_size: int = 20) -> str:
         for msg in safe_iterate_messages(messages):
             sender_name = get_sender_name(msg)
             reply_info = ""
-            if msg.reply_to and hasattr(msg.reply_to, 'reply_to_msg_id'):
+            if msg.reply_to and hasattr(msg.reply_to, "reply_to_msg_id"):
                 reply_info = f" | reply to {getattr(msg.reply_to, 'reply_to_msg_id', 'unknown')}"
             lines.append(f"ID: {msg.id} | {sender_name} | Date: {msg.date}{reply_info} | Message: {msg.message}")
         return "\n".join(lines)
@@ -710,10 +792,8 @@ async def list_messages(
                 to_date_obj = to_date_obj + timedelta(days=1, microseconds=-1)
                 # Add timezone info
                 try:
-
                     to_date_obj = to_date_obj.replace(tzinfo=timezone.utc)
                 except AttributeError:
-
                     to_date_obj = to_date_obj.replace(tzinfo=timezone.utc)
             except ValueError:
                 return "Invalid to_date format. Use YYYY-MM-DD."
@@ -729,9 +809,9 @@ async def list_messages(
         if from_date_obj or to_date_obj:
             filtered_messages = []
             for msg in safe_iterate_messages(messages):
-                if from_date_obj and hasattr(msg, 'date') and msg.date and msg.date < from_date_obj:
+                if from_date_obj and hasattr(msg, "date") and msg.date and msg.date < from_date_obj:
                     continue
-                if to_date_obj and hasattr(msg, 'date') and msg.date and msg.date > to_date_obj:
+                if to_date_obj and hasattr(msg, "date") and msg.date and msg.date > to_date_obj:
                     continue
                 filtered_messages.append(msg)
             messages = filtered_messages
@@ -744,7 +824,7 @@ async def list_messages(
             sender_name = get_sender_name(msg)
             message_text = msg.message or "[Media/No text]"
             reply_info = ""
-            if msg.reply_to and hasattr(msg.reply_to, 'reply_to_msg_id'):
+            if msg.reply_to and hasattr(msg.reply_to, "reply_to_msg_id"):
                 reply_info = f" | reply to {getattr(msg.reply_to, 'reply_to_msg_id', 'unknown')}"
 
             lines.append(f"ID: {msg.id} | {sender_name} | Date: {msg.date}{reply_info} | Message: {message_text}")
@@ -1120,7 +1200,11 @@ async def get_message_context(chat_id: int, message_id: int, context_size: int =
         if not central_message:
             return f"Message with ID {message_id} not found in chat {chat_id}."
         # Combine messages in chronological order
-        all_messages = safe_iterate_messages(messages_before) + safe_iterate_messages(central_message) + safe_iterate_messages(messages_after)
+        all_messages = (
+            safe_iterate_messages(messages_before)
+            + safe_iterate_messages(central_message)
+            + safe_iterate_messages(messages_after)
+        )
         all_messages.sort(key=lambda m: m.id)
         results = [f"Context for message {message_id} in chat {chat_id}:"]
         for msg in safe_iterate_messages(all_messages):
@@ -1129,12 +1213,12 @@ async def get_message_context(chat_id: int, message_id: int, context_size: int =
 
             # Check if this message is a reply and get the replied message
             reply_content = ""
-            if msg.reply_to and hasattr(msg.reply_to, 'reply_to_msg_id'):
+            if msg.reply_to and hasattr(msg.reply_to, "reply_to_msg_id"):
                 try:
-                    replied_msg = await client.get_messages(chat, ids=getattr(msg.reply_to, 'reply_to_msg_id', None))
+                    replied_msg = await client.get_messages(chat, ids=getattr(msg.reply_to, "reply_to_msg_id", None))
                     if replied_msg:
                         replied_sender = "Unknown"
-                        if hasattr(replied_msg, 'sender') and replied_msg.sender:
+                        if hasattr(replied_msg, "sender") and replied_msg.sender:
                             replied_sender = getattr(replied_msg.sender, "first_name", "") or getattr(
                                 replied_msg.sender, "title", "Unknown"
                             )
@@ -1223,7 +1307,7 @@ async def delete_contact(user_id: int) -> str:
     try:
         user = await client.get_entity(user_id)
         # Convert Entity to TypeInputUser
-        if hasattr(user, 'id'):
+        if hasattr(user, "id"):
             input_user = InputUser(user_id=user.id, access_hash=user.access_hash)
         else:
             input_user = InputUserEmpty()
@@ -1506,7 +1590,7 @@ async def download_media(chat_id: int, message_id: int, file_path: str) -> str:
     try:
         entity = await _resolve_chat_entity(chat_id, tg_client=client)
         msg = await client.get_messages(entity, ids=message_id)
-        if not msg or not hasattr(msg, 'media') or not msg.media:
+        if not msg or not hasattr(msg, "media") or not msg.media:
             return "No media found in the specified message."
         # Check if directory is writable
         dir_path = os.path.dirname(file_path) or "."
@@ -1820,9 +1904,7 @@ async def delete_chat_photo(chat_id: int) -> str:
 
 
 @mcp.tool()
-async def promote_admin(
-    group_id: int, user_id: int, rights: dict[Any, Any] | str | None = None
-) -> str:
+async def promote_admin(group_id: int, user_id: int, rights: dict[Any, Any] | str | None = None) -> str:
     """
     Promote a user to admin in a group/channel.
 
@@ -2131,7 +2213,6 @@ async def join_chat_by_link(link: str) -> str:
 
         # Try checking the invite before joining
         try:
-
             # Try to check invite info first (will often fail if not a member)
             invite_info = await client(functions.messages.CheckChatInviteRequest(hash=hash_part))
             if hasattr(invite_info, "chat") and invite_info.chat:
@@ -2214,7 +2295,6 @@ async def import_chat_invite(hash: str) -> str:
 
         # Try checking the invite before joining
         try:
-
             # Try to check invite info first (will often fail if not a member)
             invite_info = await client(functions.messages.CheckChatInviteRequest(hash=hash))
             if hasattr(invite_info, "chat") and invite_info.chat:
@@ -2395,7 +2475,7 @@ async def get_media_info(chat_id: int, message_id: int) -> str:
     try:
         entity = await _resolve_chat_entity(chat_id, tg_client=client)
         msg = await client.get_messages(entity, ids=message_id)
-        if not msg or not hasattr(msg, 'media') or not msg.media:
+        if not msg or not hasattr(msg, "media") or not msg.media:
             return "No media found in the specified message."
         return str(msg.media)
     except Exception as e:
@@ -2427,7 +2507,7 @@ async def search_messages(chat_id: int, query: str, limit: int = 20) -> str:
         for msg in safe_iterate_messages(messages):
             sender_name = get_sender_name(msg)
             reply_info = ""
-            if msg.reply_to and hasattr(msg.reply_to, 'reply_to_msg_id'):
+            if msg.reply_to and hasattr(msg.reply_to, "reply_to_msg_id"):
                 reply_info = f" | reply to {getattr(msg.reply_to, 'reply_to_msg_id', 'unknown')}"
             lines.append(f"ID: {msg.id} | {sender_name} | Date: {msg.date}{reply_info} | Message: {msg.message}")
         return "\n".join(lines)
@@ -2527,7 +2607,11 @@ async def archive_chat(chat_id: int) -> str:
     Archive a chat.
     """
     try:
-        await client(functions.messages.ToggleDialogPinRequest(peer=await _resolve_chat_entity(chat_id, tg_client=client), pinned=True))
+        await client(
+            functions.messages.ToggleDialogPinRequest(
+                peer=await _resolve_chat_entity(chat_id, tg_client=client), pinned=True
+            )
+        )
         return f"Chat {chat_id} archived."
     except Exception as e:
         return log_and_format_error("archive_chat", e, chat_id=chat_id)
@@ -2539,7 +2623,11 @@ async def unarchive_chat(chat_id: int) -> str:
     Unarchive a chat.
     """
     try:
-        await client(functions.messages.ToggleDialogPinRequest(peer=await _resolve_chat_entity(chat_id, tg_client=client), pinned=False))
+        await client(
+            functions.messages.ToggleDialogPinRequest(
+                peer=await _resolve_chat_entity(chat_id, tg_client=client), pinned=False
+            )
+        )
         return f"Chat {chat_id} unarchived."
     except Exception as e:
         return log_and_format_error("unarchive_chat", e, chat_id=chat_id)
@@ -2689,22 +2777,22 @@ async def get_bot_info(bot_username: str) -> str:
 async def get_user_full_info(user_id: int | None = None, username: str | None = None) -> str:
     """
     Get full user profile information including bio/about.
-    
+
     Args:
         user_id: User ID (if known)
         username: Username (e.g., "username" without @)
-    
+
     Returns:
         JSON string with full user information including bio/about
     """
     try:
         if not client.is_connected():
             await client.start()  # type: ignore
-        
+
         # Validate that at least one parameter is provided
         if not user_id and not username:
             return json.dumps({"error": "Either user_id or username must be provided"}, ensure_ascii=False)
-        
+
         # Get user entity
         if username:
             entity = await client.get_entity(username)
@@ -2712,10 +2800,10 @@ async def get_user_full_info(user_id: int | None = None, username: str | None = 
             entity = await client.get_entity(user_id)
         else:
             return json.dumps({"error": "Failed to get user entity"}, ensure_ascii=False)
-        
+
         # Get full user info
         result = await client(functions.users.GetFullUserRequest(id=entity))
-        
+
         # Extract user info
         user_info = {
             "id": entity.id,
@@ -2727,11 +2815,11 @@ async def get_user_full_info(user_id: int | None = None, username: str | None = 
             "verified": getattr(entity, "verified", False),
             "about": None,  # Will be filled from result
         }
-        
+
         # Get bio/about from full user
         if hasattr(result, "full_user") and hasattr(result.full_user, "about"):
             user_info["about"] = result.full_user.about
-        
+
         return json.dumps(user_info, indent=2, ensure_ascii=False)
     except Exception as e:
         logger.exception(f"get_user_full_info failed (user_id={user_id}, username={username})")
@@ -2797,7 +2885,7 @@ async def get_history(chat_id: int, limit: int = 100) -> str:
         for msg in safe_iterate_messages(messages):
             sender_name = get_sender_name(msg)
             reply_info = ""
-            if msg.reply_to and hasattr(msg.reply_to, 'reply_to_msg_id'):
+            if msg.reply_to and hasattr(msg.reply_to, "reply_to_msg_id"):
                 reply_info = f" | reply to {getattr(msg.reply_to, 'reply_to_msg_id', 'unknown')}"
             lines.append(f"ID: {msg.id} | {sender_name} | Date: {msg.date}{reply_info} | Message: {msg.message}")
         return "\n".join(lines)
@@ -2982,7 +3070,7 @@ async def get_pinned_messages(chat_id: int) -> str:
         for msg in safe_iterate_messages(messages):
             sender_name = get_sender_name(msg)
             reply_info = ""
-            if msg.reply_to and hasattr(msg.reply_to, 'reply_to_msg_id'):
+            if msg.reply_to and hasattr(msg.reply_to, "reply_to_msg_id"):
                 reply_info = f" | reply to {getattr(msg.reply_to, 'reply_to_msg_id', 'unknown')}"
             lines.append(
                 f"ID: {msg.id} | {sender_name} | Date: {msg.date}{reply_info} | Message: {msg.message or '[Media/No text]'}"
@@ -2998,21 +3086,21 @@ async def get_pinned_messages(chat_id: int) -> str:
 async def search_chats_by_keyword(keyword: str, chat_type: str | None = None, limit: int | None = None) -> str:
     """
     Search chats by keyword in title (case-insensitive).
-    
+
     Universal method for finding chats by any keyword.
-    
+
     Args:
         keyword: Keyword to search for in chat titles
         chat_type: Filter by chat type ('user', 'group', 'channel', or None for all)
         limit: Maximum number of chats to return (None for all)
-    
+
     Returns:
         JSON string with list of matching chats
     """
     try:
         if not client.is_connected():
             await client.start()  # type: ignore
-        
+
         result = await search_chats_by_keyword_impl(client, keyword, chat_type, limit)
         return json.dumps(result, indent=2, ensure_ascii=False, default=chat_search_json_serializer)
     except Exception as e:
@@ -3024,20 +3112,20 @@ async def search_chats_by_keyword(keyword: str, chat_type: str | None = None, li
 async def get_all_chats_list(chat_type: str | None = None, limit: int | None = None) -> str:
     """
     Get all chats with optional filtering by type.
-    
+
     Universal method for getting all chats with pagination support.
-    
+
     Args:
         chat_type: Filter by chat type ('user', 'group', 'channel', or None for all)
         limit: Maximum number of chats to return (None for all)
-    
+
     Returns:
         JSON string with list of all chats
     """
     try:
         if not client.is_connected():
             await client.start()  # type: ignore
-        
+
         result = await get_all_chats_list_impl(client, chat_type, limit)
         return json.dumps(result, indent=2, ensure_ascii=False, default=chat_search_json_serializer)
     except Exception as e:
@@ -3049,20 +3137,20 @@ async def get_all_chats_list(chat_type: str | None = None, limit: int | None = N
 async def analyze_chat_messages_for_bots(chat_id: int, message_limit: int = 100) -> str:
     """
     Analyze chat messages to determine if chat contains only bot messages or has client messages.
-    
+
     Universal method for analyzing chat message sources.
-    
+
     Args:
         chat_id: The ID of the chat to analyze
         message_limit: Maximum number of messages to analyze (default: 100)
-    
+
     Returns:
         JSON string with analysis results
     """
     try:
         if not client.is_connected():
             await client.start()  # type: ignore
-        
+
         result = await analyze_chat_messages_for_bots_impl(client, chat_id, message_limit)
         return json.dumps(result, indent=2, ensure_ascii=False, default=chat_search_json_serializer)
     except Exception as e:
@@ -3085,6 +3173,7 @@ if __name__ == "__main__":
                     from heroes_platform.heroes_telegram_mcp.event_handlers import (
                         register_event_handlers,
                     )
+
                     register_event_handlers(client)
                 except Exception as eh_err:
                     print(f"⚠️ Failed to register event handlers: {eh_err}", file=sys.stderr)
@@ -3101,28 +3190,9 @@ if __name__ == "__main__":
                 )
             sys.exit(1)
 
-    # Проверяем аргументы командной строки перед запуском
     if len(sys.argv) > 1:
         arg = sys.argv[1]
-        if arg in {"--help", "-h"}:
-            print("Telegram MCP Server v1.0.0")
-            print("Usage: python main.py [options]")
-            print("")
-            print("Options:")
-            print("  --help, -h           Show this help message")
-            print("  --version, -v        Show version information")
-            print("  --test               Smoke-check credentials and exit 0/1")
-            print("  --list-tools         List available MCP tools")
-            print("")
-            print("MCP Server provides 73+ tools for Telegram integration.")
-            print("Use --list-tools to see all available tools.")
-            sys.exit(0)
-        elif arg in {"--version", "-v"}:
-            print("Telegram MCP Server v1.0.0")
-            print("FastMCP-based server for Telegram API")
-            print("Status: Active")
-            sys.exit(0)
-        elif arg == "--test":
+        if arg == "--test":
             try:
                 if client is not None:
                     print("OK")
@@ -3132,25 +3202,6 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"Telegram MCP test failed: {e}", file=sys.stderr)
                 sys.exit(1)
-        elif arg == "--list-tools":
-            print("Available Telegram MCP Tools:")
-            print("=" * 50)
-            print("1.  get_chats")
-            print("2.  get_messages")
-            print("3.  get_contact_ids")
-            print("4.  get_chat")
-            print("5.  get_chat_metadata")
-            print("6.  get_direct_chat_by_contact")
-            print("7.  get_contact_chats")
-            print("8.  get_last_interaction")
-            print("9.  get_message_context")
-            print("10. get_me")
-            print("11. get_participants")
-            print("12. get_admins")
-            print("... and 60+ more tools")
-            print("=" * 50)
-            print("Total: 73+ tools available")
-            sys.exit(0)
         elif arg.startswith("--"):
             print(f"Unknown option: {arg}")
             print("Use --help for available options")
