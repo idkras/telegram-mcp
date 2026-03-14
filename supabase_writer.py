@@ -122,6 +122,28 @@ class SupabaseWriter:
         """Table reference in rick_messages_tasks schema (same as rick_clients_tasks)."""
         return self.client.schema(SUPABASE_SCHEMA).from_(name)
 
+    async def ping(self) -> tuple[bool, str]:
+        """Verify that the configured Supabase transport is reachable.
+
+        Used by docker/health monitoring probes so we can validate the LABA ingest
+        contour without creating synthetic rows every minute.
+        """
+        try:
+            if self._postgres_url:
+                with self._pg_conn() as conn:
+                    cur = conn.cursor()
+                    try:
+                        cur.execute("SELECT 1")
+                        cur.fetchone()
+                    finally:
+                        cur.close()
+                return True, "Supabase Postgres reachable"
+
+            self._table(TABLE_RUNS).select("run_id").limit(1).execute()
+            return True, f"Supabase REST reachable ({SUPABASE_SCHEMA}.{TABLE_RUNS})"
+        except Exception as exc:
+            return False, f"Supabase probe failed: {exc}"
+
     @contextmanager
     def _pg_conn(self) -> Iterator[Any]:
         """Yield psycopg2 connection when using direct Postgres. Caller must not use when _postgres_url is None."""

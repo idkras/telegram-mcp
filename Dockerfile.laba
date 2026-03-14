@@ -61,8 +61,8 @@ ENV TELEGRAM_USER="ikrasinsky"
 # Set PYTHONPATH so imports work correctly
 ENV PYTHONPATH=/app
 
-# Health check: verify python process is running
+# Health check: verify LABA runtime contract and Supabase reachability
 HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
-    CMD pgrep -f "heroes_platform.heroes_telegram_mcp.main" || exit 1
+    CMD python -m heroes_platform.heroes_telegram_mcp.main --healthcheck || exit 1
 
 CMD ["python", "-m", "heroes_platform.heroes_telegram_mcp.main"]

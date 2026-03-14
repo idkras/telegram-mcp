@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import asyncio
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,7 @@ def register_event_handlers(client: Any) -> None:
     from telethon import events  # type: ignore
 
     logger.info("Registering Telethon event handlers for Supabase ingestion")
+    loop = asyncio.get_running_loop()
 
     @client.on(events.NewMessage)
     async def on_new_message(event: Any) -> None:
@@ -129,3 +131,13 @@ def register_event_handlers(client: Any) -> None:
         "✅ Supabase event handlers registered (LABA_MODE)",
         file=__import__("sys").stderr,
     )
+
+    async def _record_listener_boot() -> None:
+        try:
+            writer = _get_writer()
+            run_id = await writer.start_ingest_run(mode="listener_boot")
+            await writer.finish_ingest_run(run_id, processed_chats=0, inserted_messages=0)
+        except Exception as exc:
+            logger.warning("Failed to write listener_boot ingest marker: %s", exc)
+
+    loop.create_task(_record_listener_boot())

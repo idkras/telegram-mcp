@@ -324,6 +324,8 @@ def _exit_for_cli_probe() -> None:
         print("  --help, -h           Show this help message")
         print("  --version, -v        Show version information")
         print("  --test               Smoke-check credentials and exit 0/1")
+        print("  --test-auth          Connect and verify the Telegram session is authorized")
+        print("  --healthcheck        Validate LABA runtime contract (Supabase reachability)")
         print("  --list-tools         List available MCP tools")
         print("")
         print("MCP Server provides 73+ tools for Telegram integration.")
@@ -422,6 +424,44 @@ async def _get_client_for_profile(profile: str) -> TelegramClient:
                 _lisa_client = TelegramClient("telegram_session_lisa", api_id, creds["TELEGRAM_API_HASH"])
         return _lisa_client
     raise ValueError(f"Unknown profile: {profile!r}. Use 'default'/'ik' or 'lisa'.")
+
+
+async def _run_auth_smoke_test(target_client: TelegramClient) -> tuple[bool, str]:
+    """Verify that the target session can connect and is authorized."""
+    try:
+        await target_client.connect()
+        authorized = await target_client.is_user_authorized()
+        if not authorized:
+            return False, "Telegram session is present but not authorized"
+
+        me = await target_client.get_me()
+        if me is None:
+            return False, "Telegram session is authorized but get_me() returned no user"
+
+        username = f"@{me.username}" if getattr(me, "username", None) else "no-username"
+        full_name = " ".join(part for part in [getattr(me, "first_name", None), getattr(me, "last_name", None)] if part)
+        identity = f"{username} ({full_name or 'no-name'}, id={me.id})"
+        return True, f"Telegram auth OK for {identity}"
+    finally:
+        if target_client.is_connected():
+            await target_client.disconnect()
+
+
+async def _run_runtime_healthcheck() -> tuple[bool, str]:
+    """Validate the non-interactive LABA runtime contract for Telegram ingestion."""
+    if os.getenv("LABA_MODE") != "true":
+        return True, "Telegram runtime OK (LABA_MODE disabled)"
+
+    try:
+        from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
+
+        writer = SupabaseWriter(telegram_user_id=os.getenv("TELEGRAM_USER", "ikrasinsky"))
+        ok, message = await writer.ping()
+        if not ok:
+            return False, message
+        return True, f"Telegram LABA runtime OK: {message}"
+    except Exception as exc:
+        return False, f"Telegram LABA runtime probe failed: {exc}"
 
 
 async def _sent_as_display(tg_client: TelegramClient) -> str:
@@ -3201,6 +3241,22 @@ if __name__ == "__main__":
                 sys.exit(1)
             except Exception as e:
                 print(f"Telegram MCP test failed: {e}", file=sys.stderr)
+                sys.exit(1)
+        elif arg == "--test-auth":
+            try:
+                ok, message = asyncio.run(_run_auth_smoke_test(client))
+                print(message, file=sys.stdout if ok else sys.stderr)
+                sys.exit(0 if ok else 1)
+            except Exception as e:
+                print(f"Telegram MCP auth probe failed: {e}", file=sys.stderr)
+                sys.exit(1)
+        elif arg == "--healthcheck":
+            try:
+                ok, message = asyncio.run(_run_runtime_healthcheck())
+                print(message, file=sys.stdout if ok else sys.stderr)
+                sys.exit(0 if ok else 1)
+            except Exception as e:
+                print(f"Telegram MCP runtime healthcheck failed: {e}", file=sys.stderr)
                 sys.exit(1)
         elif arg.startswith("--"):
             print(f"Unknown option: {arg}")

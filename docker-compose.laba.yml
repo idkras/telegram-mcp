@@ -27,7 +27,7 @@ services:
     tty: true
     # Persist Telegram session state
     volumes:
-      - telegram-session-data:/app/sessions
+      - telegram-session-data:/app/session
     restart: unless-stopped
     # Resource limits
     deploy:
@@ -46,7 +46,7 @@ services:
         max-file: "5"
     # Health check
     healthcheck:
-      test: ["CMD", "pgrep", "-f", "heroes_platform.heroes_telegram_mcp.main"]
+      test: ["CMD", "python", "-m", "heroes_platform.heroes_telegram_mcp.main", "--healthcheck"]
       interval: 60s
       timeout: 10s
       retries: 3
