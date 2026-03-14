@@ -6,14 +6,31 @@
 -- 1) Schema first (so our user owns it and can create function in it)
 CREATE SCHEMA IF NOT EXISTS rick_messages_tasks;
 
--- 2) Helper for updated_at in our schema (avoids "must be owner of function" when we have no public ownership)
-CREATE OR REPLACE FUNCTION rick_messages_tasks.set_updated_at()
-RETURNS TRIGGER
-LANGUAGE plpgsql
-AS $$
+-- 2) Helper for updated_at in our schema.
+-- Use create-if-missing semantics so reruns do not fail on databases where the
+-- function already exists but is owned by another privileged role.
+DO $$
 BEGIN
-  NEW.updated_at = NOW();
-  RETURN NEW;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = 'rick_messages_tasks'
+      AND p.proname = 'set_updated_at'
+      AND oidvectortypes(p.proargtypes) = ''
+  ) THEN
+    EXECUTE $fn$
+      CREATE FUNCTION rick_messages_tasks.set_updated_at()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $body$
+      BEGIN
+        NEW.updated_at = NOW();
+        RETURN NEW;
+      END;
+      $body$;
+    $fn$;
+  END IF;
 END;
 $$;
 
@@ -40,17 +57,56 @@ CREATE TABLE IF NOT EXISTS rick_messages_tasks.telegram_chats (
   last_error TEXT
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_telegram_chats_chat_id
-ON rick_messages_tasks.telegram_chats (chat_id);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_indexes
+    WHERE schemaname = 'rick_messages_tasks'
+      AND tablename = 'telegram_chats'
+      AND indexdef ILIKE '%(chat_id)%'
+      AND indexdef ILIKE 'CREATE UNIQUE INDEX%'
+  ) THEN
+    EXECUTE 'CREATE UNIQUE INDEX uq_telegram_chats_chat_id ON rick_messages_tasks.telegram_chats (chat_id)';
+  END IF;
+END;
+$$;
 
-CREATE INDEX IF NOT EXISTS ix_telegram_chats_backfill
-ON rick_messages_tasks.telegram_chats (backfill_completed, last_backfill_message_id);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_indexes
+    WHERE schemaname = 'rick_messages_tasks'
+      AND tablename = 'telegram_chats'
+      AND indexdef ILIKE '%(backfill_completed, last_backfill_message_id)%'
+  ) THEN
+    EXECUTE 'CREATE INDEX ix_telegram_chats_backfill ON rick_messages_tasks.telegram_chats (backfill_completed, last_backfill_message_id)';
+  END IF;
+END;
+$$;
 
-DROP TRIGGER IF EXISTS trg_set_updated_at_on_telegram_chats ON rick_messages_tasks.telegram_chats;
-CREATE TRIGGER trg_set_updated_at_on_telegram_chats
-BEFORE UPDATE ON rick_messages_tasks.telegram_chats
-FOR EACH ROW
-EXECUTE FUNCTION rick_messages_tasks.set_updated_at();
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_trigger t
+    JOIN pg_class c ON c.oid = t.tgrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'rick_messages_tasks'
+      AND c.relname = 'telegram_chats'
+      AND t.tgname = 'trg_set_updated_at_on_telegram_chats'
+      AND NOT t.tgisinternal
+  ) THEN
+    EXECUTE '
+      CREATE TRIGGER trg_set_updated_at_on_telegram_chats
+      BEFORE UPDATE ON rick_messages_tasks.telegram_chats
+      FOR EACH ROW
+      EXECUTE FUNCTION rick_messages_tasks.set_updated_at()
+    ';
+  END IF;
+END;
+$$;
 
 -- 4) Table: telegram_messages_raw
 CREATE TABLE IF NOT EXISTS rick_messages_tasks.telegram_messages_raw (
@@ -74,14 +130,48 @@ CREATE TABLE IF NOT EXISTS rick_messages_tasks.telegram_messages_raw (
   raw JSONB NOT NULL
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_telegram_message
-ON rick_messages_tasks.telegram_messages_raw (chat_id, message_id);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_indexes
+    WHERE schemaname = 'rick_messages_tasks'
+      AND tablename = 'telegram_messages_raw'
+      AND indexdef ILIKE '%(chat_id, message_id)%'
+      AND indexdef ILIKE 'CREATE UNIQUE INDEX%'
+  ) THEN
+    EXECUTE 'CREATE UNIQUE INDEX uq_telegram_message ON rick_messages_tasks.telegram_messages_raw (chat_id, message_id)';
+  END IF;
+END;
+$$;
 
-CREATE INDEX IF NOT EXISTS ix_telegram_chat_ts
-ON rick_messages_tasks.telegram_messages_raw (chat_id, message_ts DESC);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_indexes
+    WHERE schemaname = 'rick_messages_tasks'
+      AND tablename = 'telegram_messages_raw'
+      AND indexdef ILIKE '%(chat_id, message_ts DESC)%'
+  ) THEN
+    EXECUTE 'CREATE INDEX ix_telegram_chat_ts ON rick_messages_tasks.telegram_messages_raw (chat_id, message_ts DESC)';
+  END IF;
+END;
+$$;
 
-CREATE INDEX IF NOT EXISTS ix_telegram_sender
-ON rick_messages_tasks.telegram_messages_raw (sender_user_id);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_indexes
+    WHERE schemaname = 'rick_messages_tasks'
+      AND tablename = 'telegram_messages_raw'
+      AND indexdef ILIKE '%(sender_user_id)%'
+  ) THEN
+    EXECUTE 'CREATE INDEX ix_telegram_sender ON rick_messages_tasks.telegram_messages_raw (sender_user_id)';
+  END IF;
+END;
+$$;
 
 -- 5) Table: telegram_ingest_runs
 CREATE TABLE IF NOT EXISTS rick_messages_tasks.telegram_ingest_runs (
@@ -104,8 +194,30 @@ CREATE TABLE IF NOT EXISTS rick_messages_tasks.telegram_ingest_runs (
   status TEXT NOT NULL DEFAULT 'running'
 );
 
-CREATE INDEX IF NOT EXISTS ix_telegram_ingest_runs_mode
-ON rick_messages_tasks.telegram_ingest_runs (mode, started_at DESC);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_indexes
+    WHERE schemaname = 'rick_messages_tasks'
+      AND tablename = 'telegram_ingest_runs'
+      AND indexdef ILIKE '%(mode, started_at DESC)%'
+  ) THEN
+    EXECUTE 'CREATE INDEX ix_telegram_ingest_runs_mode ON rick_messages_tasks.telegram_ingest_runs (mode, started_at DESC)';
+  END IF;
+END;
+$$;
 
-CREATE INDEX IF NOT EXISTS ix_telegram_ingest_runs_status
-ON rick_messages_tasks.telegram_ingest_runs (status, started_at DESC);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_indexes
+    WHERE schemaname = 'rick_messages_tasks'
+      AND tablename = 'telegram_ingest_runs'
+      AND indexdef ILIKE '%(status, started_at DESC)%'
+  ) THEN
+    EXECUTE 'CREATE INDEX ix_telegram_ingest_runs_status ON rick_messages_tasks.telegram_ingest_runs (status, started_at DESC)';
+  END IF;
+END;
+$$;
