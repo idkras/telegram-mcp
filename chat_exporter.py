@@ -218,8 +218,9 @@ class ChatExporter:
         download_videos: bool = False,
         max_file_size_mb: int = 100,
         output_dir: Path | None = None,
-        markdown_dir: Path
-        | None = None,  # ✅ Директория где находится markdown файл (для правильных относительных путей)
+        markdown_dir: (
+            Path | None
+        ) = None,  # ✅ Директория где находится markdown файл (для правильных относительных путей)
         min_id: int | None = None,  # ✅ Минимальный ID сообщения (для инкрементального обновления)
     ) -> list[dict[str, Any]]:
         """Экспортировать сообщения из чата с поддержкой медиа"""

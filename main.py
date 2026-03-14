@@ -114,7 +114,7 @@ def json_serializer(obj):
 
 
 def safe_iterate_messages(
-    messages: Union["Message", "TotalList", List["Message"], None]
+    messages: Union["Message", "TotalList", List["Message"], None],
 ) -> List["Message"]:
     """Safely iterate over messages, handling both single Message and list of Messages."""
     if not messages:
