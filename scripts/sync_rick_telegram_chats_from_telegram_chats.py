@@ -26,9 +26,14 @@ workspace_root = script_dir.parents[3]
 sys.path.insert(0, str(workspace_root))
 
 from heroes_platform.shared.import_setup import enable
+
 enable(__file__)
 
-from heroes_platform.rickai_mcp.supabase_postgres import get_supabase_postgres_url, run_sql_fetch, run_sql
+from heroes_platform.rickai_mcp.supabase_postgres import (
+    get_supabase_postgres_url,
+    run_sql_fetch,
+    run_sql,
+)
 
 SCHEMA = "rick_messages_tasks"
 SOURCE_TABLE = f"{SCHEMA}.telegram_chats"
@@ -55,9 +60,14 @@ def _is_rickai_chat(title: str | None, username: str | None) -> bool:
     t = (title or "").lower()
     u = (username or "").lower()
     return (
-        "rick.ai" in t or "rick.ai" in u
-        or "rick-ai" in t or "rick-ai" in u
-        or ("rick" in t and ("advising" in t or "договор" in t or "сопровожд" in t or "report" in t))
+        "rick.ai" in t
+        or "rick.ai" in u
+        or "rick-ai" in t
+        or "rick-ai" in u
+        or (
+            "rick" in t
+            and ("advising" in t or "договор" in t or "сопровожд" in t or "report" in t)
+        )
     )
 
 
@@ -73,7 +83,9 @@ def _segment_from_title(title: str | None) -> str:
 def main() -> int:
     url = get_supabase_postgres_url()
     if not url:
-        print("ERROR: Supabase Postgres URL not set. Set SUPABASE_DB_URL or SUPABASE_RICK_DB_URL, or Keychain supabase_rick_db_url.")
+        print(
+            "ERROR: Supabase Postgres URL not set. Set SUPABASE_DB_URL or SUPABASE_RICK_DB_URL, or Keychain supabase_rick_db_url."
+        )
         return 1
 
     # Прочитать все чаты из источника
@@ -105,6 +117,7 @@ def main() -> int:
     run_sql(f"TRUNCATE TABLE {TARGET_TABLE}", postgres_url=url)
 
     import psycopg2
+
     conn = psycopg2.connect(url)
     conn.autocommit = False
     cur = conn.cursor()

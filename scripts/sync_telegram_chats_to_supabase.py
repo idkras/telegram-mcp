@@ -41,6 +41,7 @@ workspace_root = script_dir.parents[3]
 sys.path.insert(0, str(workspace_root))
 
 from heroes_platform.shared.import_setup import enable
+
 enable(__file__)
 
 from heroes_platform.shared.credentials_wrapper import get_service_credentials
@@ -62,11 +63,21 @@ def _chat_type_to_supabase(t: str) -> str:
 
 
 async def main() -> int:
-    parser = argparse.ArgumentParser(description="Sync Telegram chat list to Supabase (no messages)")
-    parser.add_argument("--profile", default=None, help="Telegram profile: ikrasinsky (default) or lisa (advising index)")
-    parser.add_argument("--keyword", default=None, help="Only sync chats with keyword in title (default: all)")
+    parser = argparse.ArgumentParser(
+        description="Sync Telegram chat list to Supabase (no messages)"
+    )
+    parser.add_argument(
+        "--profile",
+        default=None,
+        help="Telegram profile: ikrasinsky (default) or lisa (advising index)",
+    )
+    parser.add_argument(
+        "--keyword", default=None, help="Only sync chats with keyword in title (default: all)"
+    )
     parser.add_argument("--limit", type=int, default=None, help="Max chats to sync")
-    parser.add_argument("--max-dialogs", type=int, default=500, help="Max dialogs to scan (default 500)")
+    parser.add_argument(
+        "--max-dialogs", type=int, default=500, help="Max dialogs to scan (default 500)"
+    )
     args = parser.parse_args()
 
     # Profile: lisa -> Lisa's client (advising); else default (ikrasinsky)

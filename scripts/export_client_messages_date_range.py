@@ -18,9 +18,12 @@ script_dir = Path(__file__).resolve().parent
 workspace_root = script_dir.parents[3]
 sys.path.insert(0, str(workspace_root))
 from heroes_platform.shared.import_setup import enable
+
 enable(__file__)
 from heroes_platform.shared.credentials_wrapper import get_service_credentials
-from heroes_platform.heroes_telegram_mcp.scripts.supabase_chats_by_client import find_chats_by_client_alias
+from heroes_platform.heroes_telegram_mcp.scripts.supabase_chats_by_client import (
+    find_chats_by_client_alias,
+)
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
@@ -132,7 +135,14 @@ async def main():
             for msg in sorted(filtered, key=lambda m: m.date):
                 sender = _sender_name(msg)
                 text = (msg.message or "").strip() or "[media/no text]"
-                out_lines.append("- **" + msg.date.strftime("%Y-%m-%d %H:%M") + "** | " + sender + ": " + text[:500])
+                out_lines.append(
+                    "- **"
+                    + msg.date.strftime("%Y-%m-%d %H:%M")
+                    + "** | "
+                    + sender
+                    + ": "
+                    + text[:500]
+                )
             out_lines.append("")
             total_messages += len(filtered)
         except Exception as e:
@@ -151,7 +161,9 @@ async def main():
         alias_dir = args.client_alias.replace(".", "-").replace("_", "-")
         folder = base / alias_dir
         if not folder.exists():
-            folder = workspace_root / "heroes_platform" / "heroes_telegram_mcp" / "scripts" / "exports"
+            folder = (
+                workspace_root / "heroes_platform" / "heroes_telegram_mcp" / "scripts" / "exports"
+            )
             folder.mkdir(parents=True, exist_ok=True)
         out_path = folder / ("telegram-export-" + from_date_s + "-" + to_date_s + ".md")
     out_path.parent.mkdir(parents=True, exist_ok=True)

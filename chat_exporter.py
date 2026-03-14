@@ -25,6 +25,7 @@ from telethon.sessions import StringSession  # type: ignore
 from telethon.tl.types import ChannelParticipantsAdmins  # type: ignore
 
 from heroes_platform.shared.import_setup import enable
+
 enable(__file__)
 
 from heroes_platform.shared.credentials_manager import credentials_manager
@@ -133,7 +134,9 @@ class ChatExporter:
         try:
             if hasattr(entity, "megagroup") or hasattr(entity, "broadcast"):
                 # Для групп и каналов
-                admins = await self.client.get_participants(entity, filter=ChannelParticipantsAdmins)
+                admins = await self.client.get_participants(
+                    entity, filter=ChannelParticipantsAdmins
+                )
                 return [
                     {
                         "name": f"{admin.first_name} {admin.last_name or ''}".strip(),
@@ -152,12 +155,20 @@ class ChatExporter:
         try:
             if hasattr(entity, "megagroup") or hasattr(entity, "broadcast"):
                 # Для групп и каналов
-                admins = await self.client.get_participants(entity, filter=ChannelParticipantsAdmins)
+                admins = await self.client.get_participants(
+                    entity, filter=ChannelParticipantsAdmins
+                )
                 for admin in admins:
-                    if hasattr(admin, "admin_rights") and admin.admin_rights and admin.admin_rights.other:
+                    if (
+                        hasattr(admin, "admin_rights")
+                        and admin.admin_rights
+                        and admin.admin_rights.other
+                    ):
                         return {
                             "name": f"{admin.first_name} {admin.last_name or ''}".strip(),
-                            "username": (f"@{admin.username}" if admin.username else "Нет username"),
+                            "username": (
+                                f"@{admin.username}" if admin.username else "Нет username"
+                            ),
                             "id": str(admin.id),
                         }
             return {"name": "Неизвестно", "username": "Нет username", "id": "0"}
@@ -187,7 +198,9 @@ class ChatExporter:
                 return [
                     {
                         "name": f"{participant.first_name} {participant.last_name or ''}".strip(),
-                        "username": (f"@{participant.username}" if participant.username else "Нет username"),
+                        "username": (
+                            f"@{participant.username}" if participant.username else "Нет username"
+                        ),
                         "id": participant.id,
                     }
                     for participant in participants
@@ -198,20 +211,21 @@ class ChatExporter:
             return []
 
     async def export_chat_messages(
-        self, 
-        chat_id: int, 
+        self,
+        chat_id: int,
         limit: int = 1000,
         download_media: bool = True,
         download_videos: bool = False,
         max_file_size_mb: int = 100,
         output_dir: Path | None = None,
-        markdown_dir: Path | None = None,  # ✅ Директория где находится markdown файл (для правильных относительных путей)
-        min_id: int | None = None  # ✅ Минимальный ID сообщения (для инкрементального обновления)
+        markdown_dir: Path
+        | None = None,  # ✅ Директория где находится markdown файл (для правильных относительных путей)
+        min_id: int | None = None,  # ✅ Минимальный ID сообщения (для инкрементального обновления)
     ) -> list[dict[str, Any]]:
         """Экспортировать сообщения из чата с поддержкой медиа"""
         try:
             entity = await self.client.get_entity(chat_id)
-            
+
             # Получить все сообщения с пагинацией для получения ВСЕХ постов
             # Если limit=None, получаем все сообщения от начала канала
             # Если min_id указан, получаем только сообщения с ID > min_id (инкрементальное обновление)
@@ -219,46 +233,46 @@ class ChatExporter:
                 all_messages = []
                 offset_id = 0
                 last_batch_ids = set()  # ✅ Защита от зацикливания
-                max_iterations = 10000  # ✅ Защита от бесконечного цикла (10000 * 100 = 1M сообщений максимум)
+                max_iterations = (
+                    10000  # ✅ Защита от бесконечного цикла (10000 * 100 = 1M сообщений максимум)
+                )
                 iteration = 0
-                
+
                 while iteration < max_iterations:
                     iteration += 1
                     # Получаем сообщения порциями по 100
                     # Если min_id указан, используем его для фильтрации
                     # ✅ НЕ передаем min_id вообще, если он None (Telethon не принимает None)
-                    get_messages_kwargs = {
-                        "entity": entity,
-                        "limit": 100,
-                        "offset_id": offset_id
-                    }
+                    get_messages_kwargs = {"entity": entity, "limit": 100, "offset_id": offset_id}
                     if min_id is not None:
                         get_messages_kwargs["min_id"] = min_id
-                    
+
                     batch = await self.client.get_messages(**get_messages_kwargs)
                     if not batch:
                         break
-                    
+
                     # ✅ Проверка на дубликаты - защита от зацикливания
                     batch_ids = {msg.id for msg in batch}
                     if batch_ids.intersection(last_batch_ids):
                         # Получили те же сообщения - выходим
-                        print(f"⚠️ Received duplicate messages, stopping pagination (iteration {iteration})")
+                        print(
+                            f"⚠️ Received duplicate messages, stopping pagination (iteration {iteration})"
+                        )
                         break
                     last_batch_ids = batch_ids
-                    
+
                     all_messages.extend(batch)
                     if len(batch) < 100:
                         break
-                    
+
                     # offset_id = ID последнего сообщения для следующей порции
                     offset_id = batch[-1].id
                     # Небольшая задержка для избежания rate limiting
                     await asyncio.sleep(0.1)
-                
+
                 if iteration >= max_iterations:
                     print(f"⚠️ Reached maximum iterations ({max_iterations}), stopping pagination")
-                
+
                 messages = all_messages
             else:
                 # Если limit указан, получаем только указанное количество
@@ -280,7 +294,7 @@ class ChatExporter:
 
                 # Получить ссылку на сообщение в Telegram
                 telegram_link = await self._get_message_link(entity, message)
-                
+
                 # ✅ Сохраняем полный raw ответ от Telegram API для Dagster
                 # message.to_dict() возвращает полную структуру сообщения со всеми полями
                 try:
@@ -296,7 +310,7 @@ class ChatExporter:
                         "reply_to": message.reply_to.to_dict() if message.reply_to else None,
                         "media": message.media.to_dict() if message.media else None,
                     }
-                
+
                 msg_data = {
                     "id": message.id,
                     "date": message.date.isoformat() if message.date else None,
@@ -306,82 +320,86 @@ class ChatExporter:
                     "media": None,
                     "files": [],
                     "telegram_link": telegram_link,  # ✅ Ссылка на сообщение в Telegram
-                    "raw": raw_message_dict  # ✅ Полный raw ответ от Telegram API (для Dagster)
+                    "raw": raw_message_dict,  # ✅ Полный raw ответ от Telegram API (для Dagster)
                 }
 
                 # ✅ ПРИОРИТЕТ 1: Проверка и выгрузка картинок (фото)
-                if message.media and hasattr(message.media, 'photo'):
+                if message.media and hasattr(message.media, "photo"):
                     if download_media and output_dir:
                         photo_path = await self._download_photo(message, output_dir)
                         if photo_path:
                             # ✅ Используем метод для вычисления относительного пути
-                            relative_path = self._get_relative_path(photo_path, markdown_dir, output_dir)
-                            msg_data["media"] = {
-                                "type": "photo",
-                                "path": relative_path
-                            }
+                            relative_path = self._get_relative_path(
+                                photo_path, markdown_dir, output_dir
+                            )
+                            msg_data["media"] = {"type": "photo", "path": relative_path}
                     else:
                         msg_data["media"] = {"type": "photo", "path": None}
 
                 # ✅ ПРИОРИТЕТ 1: Проверка и выгрузка аудио сообщений
-                if message.media and hasattr(message.media, 'voice'):
+                if message.media and hasattr(message.media, "voice"):
                     if download_media and output_dir:
                         audio_path = await self._download_audio(message, output_dir)
                         if audio_path:
                             # ✅ Используем метод для вычисления относительного пути
-                            relative_path = self._get_relative_path(audio_path, markdown_dir, output_dir)
-                            msg_data["media"] = {
-                                "type": "voice",
-                                "path": relative_path
-                            }
+                            relative_path = self._get_relative_path(
+                                audio_path, markdown_dir, output_dir
+                            )
+                            msg_data["media"] = {"type": "voice", "path": relative_path}
                     else:
                         msg_data["media"] = {"type": "voice", "path": None}
 
                 # ✅ ПРИОРИТЕТ 2: Проверка и выгрузка документов
-                if message.media and hasattr(message.media, 'document'):
+                if message.media and hasattr(message.media, "document"):
                     doc = message.media.document
-                    file_size_mb = doc.size / (1024 * 1024) if hasattr(doc, 'size') else 0
-                    
+                    file_size_mb = doc.size / (1024 * 1024) if hasattr(doc, "size") else 0
+
                     if file_size_mb <= max_file_size_mb:
                         if download_media and output_dir:
                             doc_path = await self._download_document(message, output_dir)
                             if doc_path:
                                 filename = None
-                                if hasattr(doc, 'attributes'):
+                                if hasattr(doc, "attributes"):
                                     for attr in doc.attributes:
-                                        if hasattr(attr, 'file_name'):
+                                        if hasattr(attr, "file_name"):
                                             filename = attr.file_name
                                             break
                                 # ✅ Используем метод для вычисления относительного пути
-                                relative_path = self._get_relative_path(doc_path, markdown_dir, output_dir)
-                                msg_data["files"].append({
-                                    "type": "document",
-                                    "name": filename or "document",
-                                    "size_mb": file_size_mb,
-                                    "path": relative_path
-                                })
+                                relative_path = self._get_relative_path(
+                                    doc_path, markdown_dir, output_dir
+                                )
+                                msg_data["files"].append(
+                                    {
+                                        "type": "document",
+                                        "name": filename or "document",
+                                        "size_mb": file_size_mb,
+                                        "path": relative_path,
+                                    }
+                                )
                     else:
                         # ✅ Для невыгруженных файлов добавляем ссылку на Telegram
                         filename = None
-                        if hasattr(doc, 'attributes'):
+                        if hasattr(doc, "attributes"):
                             for attr in doc.attributes:
-                                if hasattr(attr, 'file_name'):
+                                if hasattr(attr, "file_name"):
                                     filename = attr.file_name
                                     break
-                        msg_data["files"].append({
-                            "type": "document",
-                            "name": filename or "document",
-                            "size_mb": file_size_mb,
-                            "path": None,
-                            "skipped": True,
-                            "reason": f"File too large ({file_size_mb:.2f}MB > {max_file_size_mb}MB)",
-                            "telegram_link": telegram_link  # ✅ Ссылка на сообщение в Telegram
-                        })
+                        msg_data["files"].append(
+                            {
+                                "type": "document",
+                                "name": filename or "document",
+                                "size_mb": file_size_mb,
+                                "path": None,
+                                "skipped": True,
+                                "reason": f"File too large ({file_size_mb:.2f}MB > {max_file_size_mb}MB)",
+                                "telegram_link": telegram_link,  # ✅ Ссылка на сообщение в Telegram
+                            }
+                        )
 
                 # ✅ ПРИОРИТЕТ 2: Проверка и выгрузка видео
-                if message.media and hasattr(message.media, 'video'):
+                if message.media and hasattr(message.media, "video"):
                     video = message.media.video
-                    file_size_mb = video.size / (1024 * 1024) if hasattr(video, 'size') else 0
+                    file_size_mb = video.size / (1024 * 1024) if hasattr(video, "size") else 0
 
                     msg_data["media"] = {
                         "type": "video",
@@ -390,23 +408,33 @@ class ChatExporter:
                         "telegram_link": telegram_link,
                     }
 
-                    if download_videos and file_size_mb <= max_file_size_mb and download_media and output_dir:
+                    if (
+                        download_videos
+                        and file_size_mb <= max_file_size_mb
+                        and download_media
+                        and output_dir
+                    ):
                         video_path = await self._download_video(message, output_dir)
                         if video_path:
                             # ✅ Используем метод для вычисления относительного пути
-                            relative_path = self._get_relative_path(video_path, markdown_dir, output_dir)
+                            relative_path = self._get_relative_path(
+                                video_path, markdown_dir, output_dir
+                            )
                             msg_data["media"]["path"] = relative_path
 
                 # Добавляем сообщение даже если нет текста (только медиа)
                 if message.text or msg_data.get("media") or msg_data.get("files"):
                     exported_messages.append(msg_data)
 
-            print(f"✅ Exported {len(exported_messages)} messages from chat (total fetched: {len(messages)})")
+            print(
+                f"✅ Exported {len(exported_messages)} messages from chat (total fetched: {len(messages)})"
+            )
             return exported_messages
 
         except Exception as e:
             print(f"❌ Error exporting messages: {e}")
             import traceback
+
             traceback.print_exc()
             return []
 
@@ -415,10 +443,10 @@ class ChatExporter:
         try:
             photos_dir = output_dir / "photos"
             photos_dir.mkdir(parents=True, exist_ok=True)
-            
+
             timestamp = int(message.date.timestamp()) if message.date else message.id
             file_path = photos_dir / f"{message.id}_{timestamp}.jpg"
-            
+
             downloaded_path = await self.client.download_media(message, file=file_path)
             if downloaded_path:
                 return Path(downloaded_path)
@@ -432,10 +460,10 @@ class ChatExporter:
         try:
             audio_dir = output_dir / "audio"
             audio_dir.mkdir(parents=True, exist_ok=True)
-            
+
             timestamp = int(message.date.timestamp()) if message.date else message.id
             file_path = audio_dir / f"{message.id}_{timestamp}.ogg"
-            
+
             downloaded_path = await self.client.download_media(message, file=file_path)
             if downloaded_path:
                 return Path(downloaded_path)
@@ -449,20 +477,22 @@ class ChatExporter:
         try:
             documents_dir = output_dir / "documents"
             documents_dir.mkdir(parents=True, exist_ok=True)
-            
+
             # Получить имя файла из атрибутов документа
             filename = None
-            if hasattr(message.media, 'document') and hasattr(message.media.document, 'attributes'):
+            if hasattr(message.media, "document") and hasattr(
+                message.media.document, "attributes"
+            ):
                 for attr in message.media.document.attributes:
-                    if hasattr(attr, 'file_name'):
+                    if hasattr(attr, "file_name"):
                         filename = attr.file_name
                         break
-            
+
             if not filename:
                 filename = f"document_{message.id}"
-            
+
             file_path = documents_dir / filename
-            
+
             downloaded_path = await self.client.download_media(message, file=file_path)
             if downloaded_path:
                 return Path(downloaded_path)
@@ -476,10 +506,10 @@ class ChatExporter:
         try:
             videos_dir = output_dir / "videos"
             videos_dir.mkdir(parents=True, exist_ok=True)
-            
+
             timestamp = int(message.date.timestamp()) if message.date else message.id
             file_path = videos_dir / f"{message.id}_{timestamp}.mp4"
-            
+
             downloaded_path = await self.client.download_media(message, file=file_path)
             if downloaded_path:
                 return Path(downloaded_path)
@@ -488,40 +518,44 @@ class ChatExporter:
             print(f"⚠️ Failed to download video from message {message.id}: {e}")
             return None
 
-    def _get_base_dir_for_relative_path(self, markdown_dir: Path | None, output_dir: Path | None) -> Path | None:
+    def _get_base_dir_for_relative_path(
+        self, markdown_dir: Path | None, output_dir: Path | None
+    ) -> Path | None:
         """Получить базовую директорию для вычисления относительных путей"""
         try:
             # ✅ Приоритет 1: markdown_dir (где находится markdown файл)
             if markdown_dir and isinstance(markdown_dir, Path) and markdown_dir.exists():
                 return Path(markdown_dir)
-            
+
             # ✅ Приоритет 2: output_dir.parent (родительская директория медиа файлов)
             if output_dir and isinstance(output_dir, Path) and output_dir.parent.exists():
                 return Path(output_dir.parent)
-            
+
             # ✅ Приоритет 3: output_dir (сама директория медиа файлов)
             if output_dir and isinstance(output_dir, Path):
                 return Path(output_dir)
-            
+
             return None
         except Exception as e:
             print(f"⚠️ Failed to get base dir for relative path: {e}")
             return None
 
-    def _get_relative_path(self, file_path: Path, markdown_dir: Path | None, output_dir: Path | None) -> str:
+    def _get_relative_path(
+        self, file_path: Path, markdown_dir: Path | None, output_dir: Path | None
+    ) -> str:
         """Вычислить относительный путь к файлу относительно markdown файла"""
         try:
             if not file_path or not isinstance(file_path, Path):
                 return str(file_path) if file_path else ""
-            
+
             base_dir = self._get_base_dir_for_relative_path(markdown_dir, output_dir)
             if not base_dir:
                 return str(file_path)
-            
+
             # Преобразуем в Path для проверки
             base_dir = Path(base_dir)
             file_path = Path(file_path)
-            
+
             # Проверяем что пути на одном диске и file_path является подпутем base_dir
             try:
                 if file_path.is_relative_to(base_dir):
@@ -535,7 +569,7 @@ class ChatExporter:
                 except ValueError:
                     # Пути на разных дисках или не связаны - используем абсолютный путь
                     return str(file_path)
-            
+
             return str(file_path)
         except Exception as e:
             print(f"⚠️ Failed to get relative path for {file_path}: {e}")
@@ -547,11 +581,11 @@ class ChatExporter:
             # Получить username канала/группы (если есть)
             username = getattr(entity, "username", None)
             chat_id = entity.id
-            
+
             # Для публичных каналов/групп: https://t.me/{username}/{message_id}
             if username:
                 return f"https://t.me/{username}/{message.id}"
-            
+
             # Для приватных каналов/групп: https://t.me/c/{chat_id}/{message_id}
             # chat_id должен быть положительным числом (убираем минус если есть)
             if chat_id < 0:
@@ -561,7 +595,9 @@ class ChatExporter:
             print(f"⚠️ Failed to get message link for message {message.id}: {e}")
             return None
 
-    def format_messages_for_markdown(self, messages: list[dict[str, Any]], chat_info: dict[str, Any]) -> str:
+    def format_messages_for_markdown(
+        self, messages: list[dict[str, Any]], chat_info: dict[str, Any]
+    ) -> str:
         """Форматировать сообщения для Markdown файла"""
         if not messages:
             return "# No messages found"
@@ -645,7 +681,9 @@ class ChatExporter:
         for date in sorted(messages_by_date.keys(), reverse=True):
             day_messages = messages_by_date[date]
             participants = {msg.get("sender") or "Unknown" for msg in day_messages}
-            content.append(f"- [{date}](#{date}) - {len(day_messages)} messages, {len(participants)} participants")
+            content.append(
+                f"- [{date}](#{date}) - {len(day_messages)} messages, {len(participants)} participants"
+            )
         content.append("")
 
         # Сообщения по дням
@@ -661,7 +699,9 @@ class ChatExporter:
                 sender = msg.get("sender") or "Unknown"
                 messages_by_sender[sender].append(msg)
 
-            for sender in sorted(messages_by_sender.keys(), key=lambda x: (x == "Unknown", x or "")):
+            for sender in sorted(
+                messages_by_sender.keys(), key=lambda x: (x == "Unknown", x or "")
+            ):
                 sender_messages = messages_by_sender[sender]
                 content.append(f"### 👤 {sender}")
                 content.append("")
@@ -672,7 +712,7 @@ class ChatExporter:
                         time_str = msg["date"][11:16]
                     content.append(f"**{time_str}**")
                     content.append(f"{msg.get('text', '[No text]')}")
-                    
+
                     # ✅ Добавить ссылки на медиа (приоритет 1: картинки и аудио)
                     if msg.get("media"):
                         media = msg["media"]
@@ -681,26 +721,48 @@ class ChatExporter:
                         elif media["type"] == "voice" and media.get("path"):
                             content.append(f"🎤 [Voice Message]({media['path']})")
                         elif media["type"] == "video" and media.get("path"):
-                            size_info = f" ({media.get('size_mb', 0):.2f} MB)" if media.get('size_mb') else ""
+                            size_info = (
+                                f" ({media.get('size_mb', 0):.2f} MB)"
+                                if media.get("size_mb")
+                                else ""
+                            )
                             content.append(f"🎥 [Video]({media['path']}){size_info}")
                         elif media["type"] == "video" and media.get("telegram_link"):
-                            size_info = f" ({media.get('size_mb', 0):.2f} MB)" if media.get('size_mb') else ""
-                            content.append(f"🎥 [Video in Telegram]({media['telegram_link']}){size_info}")
-                    
+                            size_info = (
+                                f" ({media.get('size_mb', 0):.2f} MB)"
+                                if media.get("size_mb")
+                                else ""
+                            )
+                            content.append(
+                                f"🎥 [Video in Telegram]({media['telegram_link']}){size_info}"
+                            )
+
                     # ✅ Добавить ссылки на файлы
                     if msg.get("files"):
                         for file_info in msg["files"]:
                             if file_info.get("skipped"):
                                 # ✅ Для невыгруженных файлов добавляем ссылку на Telegram
-                                telegram_link = file_info.get("telegram_link") or msg.get("telegram_link")
+                                telegram_link = file_info.get("telegram_link") or msg.get(
+                                    "telegram_link"
+                                )
                                 if telegram_link:
-                                    content.append(f"📎 [{file_info['name']}]({telegram_link}) - {file_info.get('reason', 'Skipped')} (файл в Telegram)")
+                                    content.append(
+                                        f"📎 [{file_info['name']}]({telegram_link}) - {file_info.get('reason', 'Skipped')} (файл в Telegram)"
+                                    )
                                 else:
-                                    content.append(f"📎 {file_info['name']} - {file_info.get('reason', 'Skipped')}")
+                                    content.append(
+                                        f"📎 {file_info['name']} - {file_info.get('reason', 'Skipped')}"
+                                    )
                             elif file_info.get("path"):
-                                size_info = f" ({file_info.get('size_mb', 0):.2f} MB)" if file_info.get('size_mb') else ""
-                                content.append(f"📎 [{file_info['name']}]({file_info['path']}){size_info}")
-                    
+                                size_info = (
+                                    f" ({file_info.get('size_mb', 0):.2f} MB)"
+                                    if file_info.get("size_mb")
+                                    else ""
+                                )
+                                content.append(
+                                    f"📎 [{file_info['name']}]({file_info['path']}){size_info}"
+                                )
+
                     content.append("")
 
         return "\n".join(content)
@@ -723,7 +785,9 @@ class ChatExporter:
             print(f"❌ Error saving file: {e}")
             return False
 
-    async def export_chat(self, chat_identifier: str, output_dir: str, is_chat_id: bool = False) -> bool:
+    async def export_chat(
+        self, chat_identifier: str, output_dir: str, is_chat_id: bool = False
+    ) -> bool:
         """Экспортировать чат"""
         try:
             # Инициализировать клиент
@@ -833,11 +897,15 @@ python chat_exporter.py --chat_id {chat_info['id']} --output_dir .
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Telegram Chat Exporter with Mac Keychain Integration")
+    parser = argparse.ArgumentParser(
+        description="Telegram Chat Exporter with Mac Keychain Integration"
+    )
     parser.add_argument("--chat_name", help="Chat name to search for")
     parser.add_argument("--chat_id", help="Chat ID (use negative numbers for groups/channels)")
     parser.add_argument("--output_dir", required=True, help="Output directory for exported files")
-    parser.add_argument("--limit", type=int, default=1000, help="Maximum number of messages to export")
+    parser.add_argument(
+        "--limit", type=int, default=1000, help="Maximum number of messages to export"
+    )
 
     args = parser.parse_args()
 

@@ -25,6 +25,7 @@ workspace_root = script_dir.parents[3]
 sys.path.insert(0, str(workspace_root))
 
 from heroes_platform.shared.import_setup import enable
+
 enable(__file__)
 
 
@@ -55,7 +56,10 @@ def find_chats_by_client_alias(
     Returns:
         {"success": bool, "chats": list[dict], "count": int} или {"success": False, "error": str}.
     """
-    from heroes_platform.rickai_mcp.supabase_postgres import get_supabase_postgres_url, run_sql_fetch
+    from heroes_platform.rickai_mcp.supabase_postgres import (
+        get_supabase_postgres_url,
+        run_sql_fetch,
+    )
 
     pattern_raw = _search_pattern_from_alias(client_alias)
     if not pattern_raw:
@@ -73,7 +77,12 @@ LIMIT {max(1, min(limit, 200))}
 """
     out = run_sql_fetch(sql)
     if not out.get("success"):
-        return {"success": False, "error": out.get("error", "Unknown error"), "chats": [], "count": 0}
+        return {
+            "success": False,
+            "error": out.get("error", "Unknown error"),
+            "chats": [],
+            "count": 0,
+        }
     rows = out.get("rows") or []
     return {"success": True, "chats": rows, "count": len(rows)}
 
@@ -103,7 +112,11 @@ LIMIT {len(chat_ids) * max(1, min(per_chat_limit, 500))}
 """
     out = run_sql_fetch(sql)
     if not out.get("success"):
-        return {"success": False, "error": out.get("error", "Unknown error"), "messages_by_chat": {}}
+        return {
+            "success": False,
+            "error": out.get("error", "Unknown error"),
+            "messages_by_chat": {},
+        }
     rows = out.get("rows") or []
     by_chat: dict[str, list] = {}
     for r in rows:
@@ -116,14 +129,23 @@ LIMIT {len(chat_ids) * max(1, min(per_chat_limit, 500))}
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Find Telegram chats by Rick client alias (Supabase SQL)")
+    parser = argparse.ArgumentParser(
+        description="Find Telegram chats by Rick client alias (Supabase SQL)"
+    )
     parser.add_argument("client_alias", help="Client alias, e.g. vipavenue-ru, elyts-ru")
     parser.add_argument("--limit", type=int, default=50, help="Max chats to return")
-    parser.add_argument("--table", default="rick_telegram_chats",
-                        choices=["rick_telegram_chats", "telegram_chats"],
-                        help="Table to search (rick_telegram_chats = only Rick.ai subset)")
-    parser.add_argument("--messages", type=int, default=0,
-                        help="If >0, fetch last N messages per chat from telegram_messages_raw")
+    parser.add_argument(
+        "--table",
+        default="rick_telegram_chats",
+        choices=["rick_telegram_chats", "telegram_chats"],
+        help="Table to search (rick_telegram_chats = only Rick.ai subset)",
+    )
+    parser.add_argument(
+        "--messages",
+        type=int,
+        default=0,
+        help="If >0, fetch last N messages per chat from telegram_messages_raw",
+    )
     args = parser.parse_args()
 
     result = find_chats_by_client_alias(

@@ -61,16 +61,12 @@ def validate_via_direct_postgres(postgres_url: str) -> Dict[str, Any]:
     try:
         import psycopg2
     except ImportError:
-        validation_result["errors"].append(
-            "psycopg2 не установлен. pip install psycopg2-binary"
-        )
+        validation_result["errors"].append("psycopg2 не установлен. pip install psycopg2-binary")
         return validation_result
     try:
         conn = psycopg2.connect(postgres_url)
         cur = conn.cursor()
-        cur.execute(
-            "SELECT * FROM rick_messages_tasks.telegram_messages_raw LIMIT 1"
-        )
+        cur.execute("SELECT * FROM rick_messages_tasks.telegram_messages_raw LIMIT 1")
         validation_result["table_exists"] = True
         row = cur.fetchone()
         if row:
@@ -109,8 +105,12 @@ def load_bronze_example() -> Dict[str, Any] | None:
     """Загружает пример bronze JSON файла для сравнения структуры."""
     # Ищем примеры bronze файлов
     bronze_paths = [
-        Path("telegram_exported_channels/krasinsky_channels/bronze/ikrasinsky_7581298455_bronze.json"),
-        Path("[heroes] telegram.ik.all/easypay_chats/EasyPay._Payments_Stripe_and_other_2306629974.md"),
+        Path(
+            "telegram_exported_channels/krasinsky_channels/bronze/ikrasinsky_7581298455_bronze.json"
+        ),
+        Path(
+            "[heroes] telegram.ik.all/easypay_chats/EasyPay._Payments_Stripe_and_other_2306629974.md"
+        ),
     ]
 
     for bronze_path in bronze_paths:
@@ -225,9 +225,7 @@ def validate_supabase_schema(supabase_client: Client) -> Dict[str, Any]:
             sample_fields = set(validation_result["sample_data"].keys())
             missing_fields = set(required_fields) - sample_fields
             if missing_fields:
-                validation_result["errors"].append(
-                    f"Отсутствуют поля: {missing_fields}"
-                )
+                validation_result["errors"].append(f"Отсутствуют поля: {missing_fields}")
                 print(f"⚠️  Отсутствуют поля: {missing_fields}")
             else:
                 print("✅ Все обязательные поля присутствуют")
@@ -266,7 +264,9 @@ def compare_bronze_with_schema(
         bronze_fields = set(bronze_msg.keys())
         comparison["bronze_fields"] = list(bronze_fields)
         print(f"\n📦 Поля в bronze message: {sorted(bronze_fields)}")
-        print(f"   Пример: chat_id={bronze_example['bronze_example'].get('chat_id')}, message_id={bronze_msg.get('id')}")
+        print(
+            f"   Пример: chat_id={bronze_example['bronze_example'].get('chat_id')}, message_id={bronze_msg.get('id')}"
+        )
 
     # Извлекаем поля из Supabase схемы
     if supabase_schema.get("sample_data"):
@@ -293,15 +293,11 @@ def compare_bronze_with_schema(
         supabase_only = supabase_fields - bronze_fields
 
         if bronze_only:
-            comparison["gaps"].append(
-                f"Поля только в bronze: {bronze_only}"
-            )
+            comparison["gaps"].append(f"Поля только в bronze: {bronze_only}")
             print(f"⚠️  Поля только в bronze: {bronze_only}")
 
         if supabase_only:
-            comparison["gaps"].append(
-                f"Поля только в Supabase: {supabase_only}"
-            )
+            comparison["gaps"].append(f"Поля только в Supabase: {supabase_only}")
             print(f"ℹ️  Поля только в Supabase: {supabase_only}")
 
     # Рекомендации
@@ -343,7 +339,9 @@ def main():
             print("\n📡 Шаг 1: Подключение к Supabase REST API...")
         supabase_client = get_supabase_client()
         if not supabase_client:
-            print("❌ Не удалось подключиться к Supabase (REST). Задайте SUPABASE_DB_URL для прямого Postgres.")
+            print(
+                "❌ Не удалось подключиться к Supabase (REST). Задайте SUPABASE_DB_URL для прямого Postgres."
+            )
             sys.exit(1)
         if not postgres_url:
             print("✅ Подключение к Supabase успешно")

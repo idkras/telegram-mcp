@@ -28,9 +28,9 @@ from heroes_platform.heroes_telegram_mcp.session_manager import create_telegram_
 async def create_session_for_rick_coposlly_linkedinhero():
     """Create a new Telegram session token for rick-coposlly-linkedinhero"""
     print("INFO: Starting Telegram session creation for rick-coposlly-linkedinhero...")
-    
+
     success, session_string, error = await create_telegram_session("rick-coposlly-linkedinhero")
-    
+
     if success:
         print("SUCCESS: Session token created and saved!")
         print(f"INFO: Session token: {session_string[:50] if session_string else 'N/A'}...")

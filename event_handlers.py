@@ -87,7 +87,8 @@ def register_event_handlers(client: Any) -> None:
             if success:
                 # Update last_seen cursor
                 await writer.update_chat_cursor(
-                    chat_id, last_seen_message_id=message.id,
+                    chat_id,
+                    last_seen_message_id=message.id,
                 )
         except Exception as exc:
             logger.error("Error handling new message: %s", exc, exc_info=True)
@@ -118,15 +119,15 @@ def register_event_handlers(client: Any) -> None:
             deleted_ids = event.deleted_ids
             chat_id = event.chat_id
             logger.info(
-                "Messages deleted in chat %s: %s", chat_id, deleted_ids,
+                "Messages deleted in chat %s: %s",
+                chat_id,
+                deleted_ids,
             )
             # Future: mark messages as deleted in Supabase
         except Exception as exc:
             logger.error("Error handling deleted message: %s", exc, exc_info=True)
 
-    logger.info(
-        "Event handlers registered: NewMessage, MessageEdited, MessageDeleted"
-    )
+    logger.info("Event handlers registered: NewMessage, MessageEdited, MessageDeleted")
     print(
         "✅ Supabase event handlers registered (LABA_MODE)",
         file=__import__("sys").stderr,

@@ -22,6 +22,7 @@ workspace_root = script_dir.parents[3]
 sys.path.insert(0, str(workspace_root))
 
 from heroes_platform.shared.import_setup import enable
+
 enable(__file__)
 
 from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter

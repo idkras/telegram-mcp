@@ -38,6 +38,7 @@ workspace_root = script_dir.parents[3]
 sys.path.insert(0, str(workspace_root))
 
 from heroes_platform.shared.import_setup import enable
+
 enable(__file__)
 
 from heroes_platform.shared.credentials_wrapper import get_service_credentials

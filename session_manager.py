@@ -37,17 +37,17 @@ import telethon.errors.rpcerrorlist  # type: ignore
 
 def get_profile_credential_names(profile: str) -> dict[str, str]:
     """Get credential names for a specific Telegram profile.
-    
+
     📚 SEE: heroes_platform/shared/credentials_wrapper.py for profile mapping logic
-    
+
     Args:
         profile: Profile name (ikrasinsky, lisa, rick-coposlly-linkedinhero)
-        
+
     Returns:
         dict with credential names: api_id, api_hash, session, phone
     """
     profile_lower = profile.lower()
-    
+
     if profile_lower == "rick-coposlly-linkedinhero":
         return {
             "api_id": "rick_coposlly_linkedinhero_api_id",
@@ -87,24 +87,24 @@ async def create_telegram_session(
     password: Optional[str] = None,
 ) -> tuple[bool, Optional[str], Optional[str]]:
     """Create or update Telegram session for a specific profile.
-    
+
     📚 SEE: heroes_platform/heroes_telegram_mcp/scripts/update_session.py for reference implementation
-    
+
     Args:
         profile: Profile name (ikrasinsky, lisa, rick-coposlly-linkedinhero)
         phone: Phone number (optional, will be loaded from keychain if not provided)
         code: Verification code (optional, will be requested if not provided)
         password: 2FA password (optional, will be requested if needed)
-        
+
     Returns:
         tuple: (success: bool, session_string: Optional[str], error_message: Optional[str])
     """
     credential_names = get_profile_credential_names(profile)
-    
+
     # Get API credentials
     api_id_result = credentials_manager.get_credential(credential_names["api_id"])
     api_hash_result = credentials_manager.get_credential(credential_names["api_hash"])
-    
+
     if not api_id_result.success or not api_hash_result.success:
         error_msg = f"Failed to get API credentials for profile {profile}"
         if not api_id_result.success:
@@ -112,23 +112,23 @@ async def create_telegram_session(
         if not api_hash_result.success:
             error_msg += f": API Hash - {api_hash_result.error}"
         return False, None, error_msg
-    
+
     api_id = int(api_id_result.value) if api_id_result.value else 0
     api_hash = api_hash_result.value
-    
+
     # Create session
     session = StringSession()
     client = TelegramClient(session, api_id, api_hash)
-    
+
     try:
         await client.connect()
-        
+
         if await client.is_user_authorized():
             # Already authorized, just get session
             session_string = client.session.save()
             me = await client.get_me()
             return True, session_string, None
-        
+
         # Need authorization
         # Get phone
         if not phone:
@@ -137,14 +137,14 @@ async def create_telegram_session(
                 phone = phone_result.value
             else:
                 phone = input("Enter your phone number (with country code, e.g., +1234567890): ")
-        
+
         # Send code request
         await client.send_code_request(phone)
-        
+
         # Get verification code
         if not code:
             code = input("Enter the verification code: ")
-        
+
         # Sign in with code
         try:
             await client.sign_in(phone, code)
@@ -152,33 +152,31 @@ async def create_telegram_session(
             # 2FA is enabled
             if not password:
                 password = input("Enter your 2FA password: ")
-            
+
             try:
                 await client.sign_in(password=password)
             except telethon.errors.rpcerrorlist.PasswordHashInvalidError:
                 return False, None, "Invalid 2FA password"
             except Exception as e:
                 return False, None, f"2FA authorization failed: {e}"
-        
+
         # Get session string
         session_string = client.session.save()
-        
+
         # Get user info
         me = await client.get_me()
         user_info = f"{me.first_name} {me.last_name or ''} (@{me.username or 'no username'})"
-        
+
         # Save to keychain
         success = credentials_manager.store_credential(
-            credential_names["session"],
-            session_string,
-            "keychain"
+            credential_names["session"], session_string, "keychain"
         )
-        
+
         if success:
             return True, session_string, None
         else:
             return False, None, "Failed to save session to keychain"
-    
+
     except Exception as e:
         return False, None, f"Failed to create session: {e}"
     finally:
@@ -187,36 +185,36 @@ async def create_telegram_session(
 
 async def test_session(profile: str) -> tuple[bool, Optional[str]]:
     """Test if session exists and is valid for a profile.
-    
+
     Args:
         profile: Profile name
-        
+
     Returns:
         tuple: (is_valid: bool, user_info: Optional[str])
     """
     credential_names = get_profile_credential_names(profile)
-    
+
     # Get credentials
     api_id_result = credentials_manager.get_credential(credential_names["api_id"])
     api_hash_result = credentials_manager.get_credential(credential_names["api_hash"])
     session_result = credentials_manager.get_credential(credential_names["session"])
-    
+
     if not api_id_result.success or not api_hash_result.success:
         return False, None
-    
+
     if not session_result.success or not session_result.value:
         return False, None
-    
+
     api_id = int(api_id_result.value) if api_id_result.value else 0
     api_hash = api_hash_result.value
     session_string = session_result.value
-    
+
     # Test session
     try:
         session = StringSession(session_string)
         client = TelegramClient(session, api_id, api_hash)
         await client.connect()
-        
+
         if await client.is_user_authorized():
             me = await client.get_me()
             user_info = f"{me.first_name} {me.last_name or ''} (@{me.username or 'no username'})"

@@ -26,7 +26,10 @@ from heroes_platform.rickai_mcp.supabase_postgres import (
 
 # Repo root for default migration path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-DEFAULT_MIGRATION = REPO_ROOT / "heroes_platform/heroes_telegram_mcp/sql_migrations/20250110000001_telegram_tdlib_tables.sql"
+DEFAULT_MIGRATION = (
+    REPO_ROOT
+    / "heroes_platform/heroes_telegram_mcp/sql_migrations/20250110000001_telegram_tdlib_tables.sql"
+)
 
 
 def main() -> int:
@@ -39,9 +42,7 @@ def main() -> int:
         )
         return 1
 
-    migration_path = Path(
-        os.getenv("APPLY_MIGRATION_FILE", str(DEFAULT_MIGRATION))
-    )
+    migration_path = Path(os.getenv("APPLY_MIGRATION_FILE", str(DEFAULT_MIGRATION)))
     result = supabase_apply_migration(migration_path, postgres_url=db_url)
     if not result.get("success"):
         print(result.get("error", result.get("message", "Unknown error")), file=sys.stderr)

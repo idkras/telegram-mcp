@@ -28,10 +28,10 @@ from heroes_platform.heroes_telegram_mcp.session_manager import create_telegram_
 async def create_new_session():
     """Create a new Telegram session token for default profile (ikrasinsky)"""
     print("INFO: Starting Telegram session token update...")
-    
+
     # Use default profile (ikrasinsky)
     success, session_string, error = await create_telegram_session("ikrasinsky")
-    
+
     if success:
         print("SUCCESS: Session token created and saved!")
         print(f"INFO: Session token: {session_string[:50] if session_string else 'N/A'}...")

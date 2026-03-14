@@ -46,6 +46,7 @@ def _get_postgres_url() -> str | None:
         return url
     try:
         from heroes_platform.shared.credentials_manager import credentials_manager
+
         result = credentials_manager.get_credential("supabase_rick_db_url")
         if result.success and result.value:
             return result.value
@@ -148,6 +149,7 @@ class SupabaseWriter:
     def _pg_conn(self) -> Iterator[Any]:
         """Yield psycopg2 connection when using direct Postgres. Caller must not use when _postgres_url is None."""
         import psycopg2
+
         conn = psycopg2.connect(self._postgres_url)
         try:
             yield conn
@@ -312,7 +314,8 @@ class SupabaseWriter:
                 with self._pg_conn() as conn:
                     return self._write_message_pg(conn, row)
             self._table(TABLE_MESSAGES).upsert(
-                row, on_conflict="chat_id,message_id",
+                row,
+                on_conflict="chat_id,message_id",
             ).execute()
             return True
         except Exception as exc:
@@ -338,16 +341,15 @@ class SupabaseWriter:
         if not messages:
             return 0
 
-        rows = [
-            self._telethon_message_to_row(m, chat_id, chat_type) for m in messages
-        ]
+        rows = [self._telethon_message_to_row(m, chat_id, chat_type) for m in messages]
 
         try:
             if self._postgres_url:
                 with self._pg_conn() as conn:
                     return self._write_messages_batch_pg(conn, rows)
             self._table(TABLE_MESSAGES).upsert(
-                rows, on_conflict="chat_id,message_id",
+                rows,
+                on_conflict="chat_id,message_id",
             ).execute()
             return len(rows)
         except Exception as exc:
@@ -411,9 +413,7 @@ class SupabaseWriter:
             cid = str(chat_id)
             if self._postgres_url:
                 with self._pg_conn() as conn:
-                    return self._upsert_chat_pg(
-                        conn, cid, chat_type, chat_title, chat_username
-                    )
+                    return self._upsert_chat_pg(conn, cid, chat_type, chat_title, chat_username)
             row: dict[str, Any] = {
                 "chat_id": cid,
                 "chat_type": chat_type,
@@ -534,13 +534,7 @@ class SupabaseWriter:
             if self._postgres_url:
                 with self._pg_conn() as conn:
                     return self._get_chat_cursor_pg(conn, cid)
-            response = (
-                self._table(TABLE_CHATS)
-                .select("*")
-                .eq("chat_id", cid)
-                .limit(1)
-                .execute()
-            )
+            response = self._table(TABLE_CHATS).select("*").eq("chat_id", cid).limit(1).execute()
             if response.data:
                 return response.data[0]
             return None
@@ -567,9 +561,7 @@ class SupabaseWriter:
         finally:
             cur.close()
 
-    def lookup_chats_by_query(
-        self, query: str, limit: int = 10
-    ) -> list[dict[str, Any]]:
+    def lookup_chats_by_query(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
         """Lookup chat_id by title or username (avoid get_direct_chat_by_contact).
 
         Use after sync_telegram_chats_to_supabase has populated telegram_chats.
@@ -593,7 +585,7 @@ class SupabaseWriter:
                         .limit(limit)
                         .execute()
                     )
-                    for row in (response.data or []):
+                    for row in response.data or []:
                         cid = row.get("chat_id")
                         if cid and cid not in seen:
                             seen.add(cid)
@@ -638,12 +630,14 @@ class SupabaseWriter:
                 with self._pg_conn() as conn:
                     self._start_ingest_run_pg(conn, run_id, mode)
             else:
-                self._table(TABLE_RUNS).insert({
-                    "run_id": run_id,
-                    "mode": mode,
-                    "started_at": datetime.now(tz=timezone.utc).isoformat(),
-                    "status": "running",
-                }).execute()
+                self._table(TABLE_RUNS).insert(
+                    {
+                        "run_id": run_id,
+                        "mode": mode,
+                        "started_at": datetime.now(tz=timezone.utc).isoformat(),
+                        "status": "running",
+                    }
+                ).execute()
         except Exception as exc:
             logger.warning("Failed to start ingest run: %s", exc)
         return run_id
@@ -746,7 +740,9 @@ class SupabaseWriter:
 
                 if len(batch) >= self.batch_size:
                     written = await self.write_messages_batch(
-                        batch, chat_id, chat_type,
+                        batch,
+                        chat_id,
+                        chat_type,
                     )
                     total_written += written
                     batch = []
@@ -774,6 +770,7 @@ class SupabaseWriter:
 # JSON safety helper
 # ---------------------------------------------------------------------------
 
+
 def _make_json_safe(obj: Any) -> Any:
     """Recursively make an object JSON-serializable.
 
@@ -790,8 +787,9 @@ def _make_json_safe(obj: Any) -> Any:
     if hasattr(obj, "__dict__") and not isinstance(obj, (str, int, float, bool)):
         # Convert custom objects to dict
         try:
-            return {k: _make_json_safe(v) for k, v in obj.__dict__.items()
-                    if not k.startswith("_")}
+            return {
+                k: _make_json_safe(v) for k, v in obj.__dict__.items() if not k.startswith("_")
+            }
         except Exception:
             return str(obj)
     return obj

@@ -44,17 +44,17 @@ def format_chat_info(entity: Any, dialog: Any = None) -> dict[str, Any]:
     """Форматировать информацию о чате в словарь"""
     title = getattr(entity, "title", None) or getattr(entity, "first_name", "")
     chat_type = get_chat_type(entity)
-    
+
     chat_info = {
         "id": entity.id,
         "title": title,
         "type": chat_type,
         "username": getattr(entity, "username", None),
     }
-    
+
     if dialog:
         chat_info["unread_count"] = getattr(dialog, "unread_count", 0)
-    
+
     return chat_info
 
 
@@ -67,17 +67,17 @@ async def search_chats_by_keyword_impl(
 ) -> dict[str, Any]:
     """
     Универсальная реализация поиска чатов по ключевому слову.
-    
+
     Ограничивает число просматриваемых диалогов (max_dialogs_to_scan), чтобы избежать
     долгого выполнения при большом числе чатов (см. ai.incidents 15 Feb 2026).
-    
+
     Args:
         client: TelegramClient instance
         keyword: Keyword to search for in chat titles
         chat_type: Filter by chat type ('user', 'group', 'channel', or None for all)
         limit: Maximum number of chats to return (None for all)
         max_dialogs_to_scan: Stop iterating after this many dialogs (default 500); None = no cap
-    
+
     Returns:
         Dictionary with search results
     """
@@ -130,16 +130,16 @@ async def get_all_chats_list_impl(
 ) -> dict[str, Any]:
     """
     Универсальная реализация получения всех чатов.
-    
+
     Ограничивает число просматриваемых диалогов (max_dialogs_to_scan), чтобы избежать
     долгого выполнения при большом числе чатов (см. ai.incidents 15 Feb 2026).
-    
+
     Args:
         client: TelegramClient instance
         chat_type: Filter by chat type ('user', 'group', 'channel', or None for all)
         limit: Maximum number of chats to return (None for all)
         max_dialogs_to_scan: Stop iterating after this many dialogs (default 500); None = no cap
-    
+
     Returns:
         Dictionary with all chats
     """
@@ -178,36 +178,34 @@ async def get_all_chats_list_impl(
 
 
 async def analyze_chat_messages_for_bots_impl(
-    client: Any,
-    chat_id: int,
-    message_limit: int = 100
+    client: Any, chat_id: int, message_limit: int = 100
 ) -> dict[str, Any]:
     """
     Универсальная реализация анализа сообщений в чате.
-    
+
     Args:
         client: TelegramClient instance
         chat_id: The ID of the chat to analyze
         message_limit: Maximum number of messages to analyze (default: 100)
-    
+
     Returns:
         Dictionary with analysis results
     """
     entity = await client.get_entity(chat_id)
-    
+
     bot_messages = 0
     user_messages = 0
     client_messages = 0
     total_analyzed = 0
-    
+
     async for message in client.iter_messages(entity, limit=message_limit):
         # Skip service messages
-        if hasattr(message, 'action') and message.action:
+        if hasattr(message, "action") and message.action:
             continue
-        
+
         total_analyzed += 1
         sender = await message.get_sender()
-        
+
         if sender:
             if isinstance(sender, User) and sender.bot:
                 bot_messages += 1
@@ -216,7 +214,7 @@ async def analyze_chat_messages_for_bots_impl(
                 # Check if it's a client message (not a bot)
                 if not (isinstance(sender, User) and sender.bot):
                     client_messages += 1
-    
+
     return {
         "chat_id": chat_id,
         "total_messages_analyzed": total_analyzed,
@@ -225,5 +223,5 @@ async def analyze_chat_messages_for_bots_impl(
         "client_messages": client_messages,
         "only_bots": bot_messages > 0 and client_messages == 0,
         "has_client_messages": client_messages > 0,
-        "analysis_date": datetime.now().isoformat()
+        "analysis_date": datetime.now().isoformat(),
     }
