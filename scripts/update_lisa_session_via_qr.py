@@ -65,32 +65,45 @@ async def main() -> None:
             print("INFO: Fresh client was already authorized; session saved without QR flow.")
             return
 
-        qr_login = await client.qr_login()
         qr_path = _qr_output_path()
-        image = qrcode.make(qr_login.url)
-        image.save(qr_path)
         url_path = qr_path.with_suffix(".txt")
-        url_path.write_text(qr_login.url, encoding="utf-8")
 
-        print(f"INFO: QR login image saved to: {qr_path}")
-        print(f"INFO: Raw tg:// login URL saved to: {url_path}")
-        print(f"INFO: Raw tg:// login URL: {qr_login.url}")
-        print(f"INFO: QR token expires at: {qr_login.expires.isoformat()}")
-        print("INFO: Open Telegram on Lisa's already logged-in device, go to Settings -> Devices -> Link Desktop Device, and scan this QR.")
-        print("INFO: Alternative: open the raw tg:// URL on a device where Lisa Telegram is already logged in.")
+        while True:
+            qr_login = await client.qr_login()
+            image = qrcode.make(qr_login.url)
+            image.save(qr_path)
+            url_path.write_text(qr_login.url, encoding="utf-8")
 
-        try:
-            import subprocess
+            print(f"INFO: QR login image saved to: {qr_path}")
+            print(f"INFO: Raw tg:// login URL saved to: {url_path}")
+            print(f"INFO: Raw tg:// login URL: {qr_login.url}")
+            print(f"INFO: QR token expires at: {qr_login.expires.isoformat()}")
+            print(
+                "INFO: Open Telegram on Lisa's already logged-in device, "
+                "go to Settings -> Devices -> Link Desktop Device, and scan this QR."
+            )
+            print(
+                "INFO: Alternative: open the raw tg:// URL on a device where Lisa "
+                "Telegram is already logged in."
+            )
 
-            subprocess.run(["open", str(qr_path)], check=False)
-        except Exception:
-            pass
+            try:
+                import subprocess
 
-        try:
-            user = await qr_login.wait()
-        except telethon.errors.rpcerrorlist.SessionPasswordNeededError:
-            password = input("Enter Lisa 2FA password: ")
-            user = await client.sign_in(password=password)
+                subprocess.run(["open", str(qr_path)], check=False)
+            except Exception:
+                pass
+
+            try:
+                user = await qr_login.wait()
+                break
+            except TimeoutError:
+                print("WARN: QR token expired before scan; generating a fresh Lisa QR token...")
+                continue
+            except telethon.errors.rpcerrorlist.SessionPasswordNeededError:
+                password = input("Enter Lisa 2FA password: ")
+                user = await client.sign_in(password=password)
+                break
 
         session_string = client.session.save()
         saved = credentials_manager.store_credential(names["session"], session_string, "keychain")
