@@ -35,6 +35,19 @@ from telethon.sessions import StringSession  # type: ignore
 import telethon.errors.rpcerrorlist  # type: ignore
 
 
+def _mask_phone(phone: str) -> str:
+    """Mask phone number for terminal diagnostics."""
+    normalized = (phone or "").strip()
+    if len(normalized) <= 4:
+        return normalized
+    return f"{normalized[:2]}***{normalized[-2:]}"
+
+
+def _sent_code_type_name(sent_code_type: object) -> str:
+    """Return a readable Telegram sent-code type name."""
+    return type(sent_code_type).__name__ if sent_code_type is not None else "Unknown"
+
+
 def get_profile_credential_names(profile: str) -> dict[str, str]:
     """Get credential names for a specific Telegram profile.
 
@@ -100,6 +113,14 @@ async def create_telegram_session(
         tuple: (success: bool, session_string: Optional[str], error_message: Optional[str])
     """
     credential_names = get_profile_credential_names(profile)
+    print(
+        "INFO: Using Telegram profile "
+        f"{profile} with credential keys "
+        f"api_id={credential_names['api_id']}, "
+        f"api_hash={credential_names['api_hash']}, "
+        f"session={credential_names['session']}, "
+        f"phone={credential_names.get('phone') or 'prompt/manual'}"
+    )
 
     # Get API credentials
     api_id_result = credentials_manager.get_credential(credential_names["api_id"])
@@ -126,30 +147,36 @@ async def create_telegram_session(
         if await client.is_user_authorized():
             # Already authorized, just get session
             session_string = client.session.save()
-            me = await client.get_me()
+            await client.get_me()
             return True, session_string, None
 
         # Need authorization
-        # Get phone
         if not phone:
             phone_result = credentials_manager.get_credential(credential_names.get("phone") or "")
             if phone_result.success and phone_result.value:
                 phone = phone_result.value
+                print(f"INFO: Loaded phone from credential {credential_names.get('phone')}: {_mask_phone(phone)}")
             else:
                 phone = input("Enter your phone number (with country code, e.g., +1234567890): ")
 
-        # Send code request
-        await client.send_code_request(phone)
+        sent_code = await client.send_code_request(phone)
+        sent_type = _sent_code_type_name(getattr(sent_code, "type", None))
+        next_type = _sent_code_type_name(getattr(sent_code, "next_type", None))
+        timeout = getattr(sent_code, "timeout", None)
+        print(f"INFO: Telegram accepted code request for {_mask_phone(phone)}")
+        print(f"INFO: Delivery type: {sent_type}")
+        if next_type != "Unknown":
+            print(f"INFO: Next delivery type: {next_type}")
+        if timeout is not None:
+            print(f"INFO: Telegram timeout before another resend: {timeout}s")
+            print("INFO: If no fresh message arrives, Telegram may still expect the previous unexpired code.")
 
-        # Get verification code
         if not code:
             code = input("Enter the verification code: ")
 
-        # Sign in with code
         try:
             await client.sign_in(phone, code)
         except telethon.errors.rpcerrorlist.SessionPasswordNeededError:
-            # 2FA is enabled
             if not password:
                 password = input("Enter your 2FA password: ")
 
@@ -160,14 +187,11 @@ async def create_telegram_session(
             except Exception as e:
                 return False, None, f"2FA authorization failed: {e}"
 
-        # Get session string
         session_string = client.session.save()
 
-        # Get user info
         me = await client.get_me()
-        user_info = f"{me.first_name} {me.last_name or ''} (@{me.username or 'no username'})"
+        _user_info = f"{me.first_name} {me.last_name or ''} (@{me.username or 'no username'})"
 
-        # Save to keychain
         success = credentials_manager.store_credential(
             credential_names["session"], session_string, "keychain"
         )
