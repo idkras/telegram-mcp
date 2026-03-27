@@ -8,8 +8,8 @@ JTBD: Когда Telegram MCP сервер получает новые сооб�
 Architecture:
     - Uses Supabase REST API via supabase-py client
     - Writes to telegram_messages_raw (bronze layer) with full raw JSONB
-    - Manages telegram_chats registry with cursors for backfill/updates
-    - Logs ingest runs to telegram_ingest_runs
+    - Manages telegram_chats registry plus telegram_chat_state per-user cursors
+    - Logs ingest runs to telegram_ingest_runs with telegram_user_id scope
     - Dedup via unique index on (chat_id, message_id)
 
 Credentials: Mac Keychain via credentials_manager (supabase_rick_api_key)
@@ -22,7 +22,7 @@ import logging
 import os
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 
 logger = logging.getLogger(__name__)
@@ -32,7 +32,9 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "https://supabase.rick.ai")
 SUPABASE_SCHEMA = os.getenv("SUPABASE_TELEGRAM_SCHEMA", "rick_messages_tasks")
 TABLE_MESSAGES = "telegram_messages_raw"
 TABLE_CHATS = "telegram_chats"
+TABLE_CHAT_STATE = "telegram_chat_state"
 TABLE_RUNS = "telegram_ingest_runs"
+LISTENER_RUNTIME_MODES = ("listener_boot", "listener_heartbeat")
 
 
 def _get_postgres_url() -> str | None:
@@ -145,6 +147,29 @@ class SupabaseWriter:
         except Exception as exc:
             return False, f"Supabase probe failed: {exc}"
 
+    async def get_runtime_health(
+        self,
+        max_staleness_seconds: int | None = None,
+    ) -> tuple[bool, str]:
+        """Validate that the runtime contour is reachable and still alive."""
+        ok, message = await self.ping()
+        if not ok:
+            return False, message
+
+        staleness_seconds = max_staleness_seconds or int(
+            os.getenv("TELEGRAM_RUNTIME_MAX_STALENESS_SECONDS", "180")
+        )
+        try:
+            listener_event_at, latest_message_at = self._get_runtime_activity()
+            return _evaluate_runtime_health(
+                listener_event_at=listener_event_at,
+                latest_message_at=latest_message_at,
+                max_staleness_seconds=staleness_seconds,
+                transport_message=message,
+            )
+        except Exception as exc:
+            return False, f"Telegram LABA runtime probe failed: {exc}"
+
     @contextmanager
     def _pg_conn(self) -> Iterator[Any]:
         """Yield psycopg2 connection when using direct Postgres. Caller must not use when _postgres_url is None."""
@@ -155,6 +180,72 @@ class SupabaseWriter:
             yield conn
         finally:
             conn.close()
+
+    def _get_runtime_activity(self) -> tuple[datetime | None, datetime | None]:
+        """Return latest listener heartbeat timestamp and latest message timestamp."""
+        if self._postgres_url:
+            with self._pg_conn() as conn:
+                return self._get_runtime_activity_pg(conn)
+        return self._get_runtime_activity_rest()
+
+    def _get_runtime_activity_pg(self, conn: Any) -> tuple[datetime | None, datetime | None]:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                """
+                SELECT started_at
+                FROM rick_messages_tasks.telegram_ingest_runs
+                WHERE telegram_user_id=%s
+                  AND mode = ANY(%s)
+                ORDER BY started_at DESC
+                LIMIT 1
+                """,
+                (self.telegram_user_id, list(LISTENER_RUNTIME_MODES)),
+            )
+            runtime_row = cur.fetchone()
+            listener_event_at = _coerce_datetime(runtime_row[0]) if runtime_row else None
+
+            cur.execute(
+                """
+                SELECT created_at
+                FROM rick_messages_tasks.telegram_messages_raw
+                WHERE telegram_user_id=%s
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (self.telegram_user_id,),
+            )
+            message_row = cur.fetchone()
+            latest_message_at = _coerce_datetime(message_row[0]) if message_row else None
+            return listener_event_at, latest_message_at
+        finally:
+            cur.close()
+
+    def _get_runtime_activity_rest(self) -> tuple[datetime | None, datetime | None]:
+        listener_response = (
+            self._table(TABLE_RUNS)
+            .select("started_at")
+            .eq("telegram_user_id", self.telegram_user_id)
+            .in_("mode", list(LISTENER_RUNTIME_MODES))
+            .order("started_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        message_response = (
+            self._table(TABLE_MESSAGES)
+            .select("created_at")
+            .eq("telegram_user_id", self.telegram_user_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        listener_event_at = None
+        latest_message_at = None
+        if listener_response.data:
+            listener_event_at = _coerce_datetime(listener_response.data[0].get("started_at"))
+        if message_response.data:
+            latest_message_at = _coerce_datetime(message_response.data[0].get("created_at"))
+        return listener_event_at, latest_message_at
 
     # ------------------------------------------------------------------
     # Message writing
@@ -408,7 +499,7 @@ class SupabaseWriter:
         chat_title: str = "",
         chat_username: str | None = None,
     ) -> bool:
-        """Register or update a chat in telegram_chats."""
+        """Register or update a chat in telegram_chats global registry."""
         try:
             cid = str(chat_id)
             if self._postgres_url:
@@ -428,6 +519,25 @@ class SupabaseWriter:
             logger.warning("Failed to upsert chat %s: %s", chat_id, exc)
             return False
 
+    def _ensure_chat_state_pg(self, conn: Any, chat_id: str) -> None:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                """
+                INSERT INTO rick_messages_tasks.telegram_chat_state
+                (telegram_user_id, chat_id, is_active)
+                VALUES (%s,%s,TRUE)
+                ON CONFLICT (telegram_user_id, chat_id) DO NOTHING
+                """,
+                (self.telegram_user_id, chat_id),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cur.close()
+
     def _update_chat_cursor_pg(
         self,
         conn: Any,
@@ -439,29 +549,33 @@ class SupabaseWriter:
         now = datetime.now(tz=timezone.utc)
         cur = conn.cursor()
         try:
+            self._ensure_chat_state_pg(conn, chat_id)
             if last_seen_message_id is not None:
                 cur.execute(
                     """
-                    UPDATE rick_messages_tasks.telegram_chats
-                    SET last_seen_message_id=%s, last_seen_ts=%s WHERE chat_id=%s
+                    UPDATE rick_messages_tasks.telegram_chat_state
+                    SET last_seen_message_id=%s, last_seen_ts=%s
+                    WHERE telegram_user_id=%s AND chat_id=%s
                     """,
-                    (last_seen_message_id, now, chat_id),
+                    (last_seen_message_id, now, self.telegram_user_id, chat_id),
                 )
             if last_backfill_message_id is not None:
                 cur.execute(
                     """
-                    UPDATE rick_messages_tasks.telegram_chats
-                    SET last_backfill_message_id=%s, last_backfill_ts=%s WHERE chat_id=%s
+                    UPDATE rick_messages_tasks.telegram_chat_state
+                    SET last_backfill_message_id=%s, last_backfill_ts=%s
+                    WHERE telegram_user_id=%s AND chat_id=%s
                     """,
-                    (last_backfill_message_id, now, chat_id),
+                    (last_backfill_message_id, now, self.telegram_user_id, chat_id),
                 )
             if backfill_completed is not None:
                 cur.execute(
                     """
-                    UPDATE rick_messages_tasks.telegram_chats
-                    SET backfill_completed=%s WHERE chat_id=%s
+                    UPDATE rick_messages_tasks.telegram_chat_state
+                    SET backfill_completed=%s
+                    WHERE telegram_user_id=%s AND chat_id=%s
                     """,
-                    (backfill_completed, chat_id),
+                    (backfill_completed, self.telegram_user_id, chat_id),
                 )
             conn.commit()
             return True
@@ -478,7 +592,7 @@ class SupabaseWriter:
         last_backfill_message_id: int | None = None,
         backfill_completed: bool | None = None,
     ) -> bool:
-        """Update cursor fields for a chat (for backfill/updates tracking)."""
+        """Update cursor fields for a user-scoped chat state row."""
         try:
             if (
                 last_seen_message_id is None
@@ -496,7 +610,10 @@ class SupabaseWriter:
                         last_backfill_message_id,
                         backfill_completed,
                     )
-            update: dict[str, Any] = {}
+            update: dict[str, Any] = {
+                "telegram_user_id": self.telegram_user_id,
+                "chat_id": cid,
+            }
             now = datetime.now(tz=timezone.utc).isoformat()
             if last_seen_message_id is not None:
                 update["last_seen_message_id"] = last_seen_message_id
@@ -506,13 +623,68 @@ class SupabaseWriter:
                 update["last_backfill_ts"] = now
             if backfill_completed is not None:
                 update["backfill_completed"] = backfill_completed
-            self._table(TABLE_CHATS).update(update).eq("chat_id", cid).execute()
+            self._table(TABLE_CHAT_STATE).upsert(
+                update,
+                on_conflict="telegram_user_id,chat_id",
+            ).execute()
             return True
         except Exception as exc:
             logger.warning("Failed to update cursor for chat %s: %s", chat_id, exc)
             return False
 
     def _get_chat_cursor_pg(self, conn: Any, chat_id: str) -> dict[str, Any] | None:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                """
+                SELECT *
+                FROM rick_messages_tasks.telegram_chat_state
+                WHERE telegram_user_id=%s AND chat_id=%s
+                LIMIT 1
+                """,
+                (self.telegram_user_id, chat_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            cols = [d[0] for d in cur.description]
+            return dict(zip(cols, row))
+        finally:
+            cur.close()
+
+    async def get_chat_cursor(self, chat_id: int | str) -> dict[str, Any] | None:
+        """Get current user-scoped cursor state for a chat.
+
+        Falls back to legacy telegram_chats cursors until the additive migration
+        has been rolled through all environments.
+        """
+        try:
+            cid = str(chat_id)
+            if self._postgres_url:
+                with self._pg_conn() as conn:
+                    state = self._get_chat_cursor_pg(conn, cid)
+                    if state:
+                        return state
+                    return self._get_legacy_chat_cursor_pg(conn, cid)
+            response = (
+                self._table(TABLE_CHAT_STATE)
+                .select("*")
+                .eq("telegram_user_id", self.telegram_user_id)
+                .eq("chat_id", cid)
+                .limit(1)
+                .execute()
+            )
+            if response.data:
+                return response.data[0]
+            legacy_response = self._table(TABLE_CHATS).select("*").eq("chat_id", cid).limit(1).execute()
+            if legacy_response.data:
+                return legacy_response.data[0]
+            return None
+        except Exception as exc:
+            logger.warning("Failed to get cursor for chat %s: %s", chat_id, exc)
+            return None
+
+    def _get_legacy_chat_cursor_pg(self, conn: Any, chat_id: str) -> dict[str, Any] | None:
         cur = conn.cursor()
         try:
             cur.execute(
@@ -526,21 +698,6 @@ class SupabaseWriter:
             return dict(zip(cols, row))
         finally:
             cur.close()
-
-    async def get_chat_cursor(self, chat_id: int | str) -> dict[str, Any] | None:
-        """Get current cursor state for a chat."""
-        try:
-            cid = str(chat_id)
-            if self._postgres_url:
-                with self._pg_conn() as conn:
-                    return self._get_chat_cursor_pg(conn, cid)
-            response = self._table(TABLE_CHATS).select("*").eq("chat_id", cid).limit(1).execute()
-            if response.data:
-                return response.data[0]
-            return None
-        except Exception as exc:
-            logger.warning("Failed to get cursor for chat %s: %s", chat_id, exc)
-            return None
 
     def _lookup_chats_by_query_pg(
         self, conn: Any, pattern: str, limit: int
@@ -610,10 +767,10 @@ class SupabaseWriter:
             cur.execute(
                 """
                 INSERT INTO rick_messages_tasks.telegram_ingest_runs
-                (run_id, mode, started_at, status)
-                VALUES (%s,%s,%s,'running')
+                (run_id, telegram_user_id, mode, started_at, status)
+                VALUES (%s,%s,%s,%s,'running')
                 """,
-                (run_id, mode, now),
+                (run_id, self.telegram_user_id, mode, now),
             )
             conn.commit()
         except Exception:
@@ -633,6 +790,7 @@ class SupabaseWriter:
                 self._table(TABLE_RUNS).insert(
                     {
                         "run_id": run_id,
+                        "telegram_user_id": self.telegram_user_id,
                         "mode": mode,
                         "started_at": datetime.now(tz=timezone.utc).isoformat(),
                         "status": "running",
@@ -698,6 +856,22 @@ class SupabaseWriter:
             self._table(TABLE_RUNS).update(update).eq("run_id", run_id).execute()
         except Exception as exc:
             logger.warning("Failed to finish ingest run %s: %s", run_id, exc)
+
+    async def record_runtime_event(
+        self,
+        mode: str,
+        processed_chats: int = 0,
+        inserted_messages: int = 0,
+        error: str | None = None,
+    ) -> None:
+        """Write a short runtime marker for health and freshness probes."""
+        run_id = await self.start_ingest_run(mode=mode)
+        await self.finish_ingest_run(
+            run_id,
+            processed_chats=processed_chats,
+            inserted_messages=inserted_messages,
+            error=error,
+        )
 
     # ------------------------------------------------------------------
     # Backfill support
@@ -765,6 +939,51 @@ class SupabaseWriter:
 
         return total_written
 
+    async def catch_up_recent(
+        self,
+        telethon_client: Any,
+        chat_id: int | str,
+        chat_type: str = "unknown",
+        limit: int = 1000,
+    ) -> int:
+        """Backfill only messages newer than the last seen cursor."""
+        cursor = await self.get_chat_cursor(chat_id)
+        if not cursor or not cursor.get("last_seen_message_id"):
+            return 0
+
+        last_seen_message_id = int(cursor["last_seen_message_id"])
+        total_written = 0
+        batch: list[Any] = []
+        max_id_seen = last_seen_message_id
+
+        try:
+            async for msg in telethon_client.iter_messages(
+                entity=int(chat_id),
+                min_id=last_seen_message_id,
+                reverse=True,
+                limit=limit,
+            ):
+                batch.append(msg)
+                if msg.id > max_id_seen:
+                    max_id_seen = msg.id
+
+                if len(batch) >= self.batch_size:
+                    total_written += await self.write_messages_batch(batch, chat_id, chat_type)
+                    batch = []
+
+            if batch:
+                total_written += await self.write_messages_batch(batch, chat_id, chat_type)
+
+            if max_id_seen > last_seen_message_id:
+                await self.update_chat_cursor(
+                    chat_id,
+                    last_seen_message_id=max_id_seen,
+                )
+        except Exception as exc:
+            logger.warning("Recent catch-up error for chat %s: %s", chat_id, exc)
+
+        return total_written
+
 
 # ---------------------------------------------------------------------------
 # JSON safety helper
@@ -793,3 +1012,47 @@ def _make_json_safe(obj: Any) -> Any:
         except Exception:
             return str(obj)
     return obj
+
+
+def _coerce_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+    if isinstance(value, str):
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return None
+
+
+def _evaluate_runtime_health(
+    *,
+    listener_event_at: datetime | None,
+    latest_message_at: datetime | None,
+    max_staleness_seconds: int,
+    transport_message: str,
+) -> tuple[bool, str]:
+    if listener_event_at is None:
+        return False, f"Telegram LABA runtime unhealthy: no listener heartbeat found; {transport_message}"
+
+    now = datetime.now(tz=timezone.utc)
+    listener_age = now - listener_event_at
+    if listener_age > timedelta(seconds=max_staleness_seconds):
+        return (
+            False,
+            "Telegram LABA runtime unhealthy: listener heartbeat stale "
+            f"({int(listener_age.total_seconds())}s old); {transport_message}",
+        )
+
+    details = [
+        transport_message,
+        f"listener heartbeat age={int(listener_age.total_seconds())}s",
+    ]
+    if latest_message_at is not None:
+        latest_message_age = now - latest_message_at
+        details.append(f"latest message age={int(latest_message_age.total_seconds())}s")
+    else:
+        details.append("latest message age=none yet")
+
+    return True, "Telegram LABA runtime OK: " + "; ".join(details)

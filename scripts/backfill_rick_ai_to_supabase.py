@@ -68,6 +68,12 @@ async def main() -> int:
         action="store_true",
         help="Load ALL conversations (ignore keyword, use get_all_chats_list)",
     )
+    parser.add_argument(
+        "--max-dialogs",
+        type=int,
+        default=2000,
+        help="Max dialogs to scan when loading chats (default 2000)",
+    )
     parser.add_argument("--limit-chats", type=int, default=None, help="Max chats to process")
     parser.add_argument("--limit-messages", type=int, default=5000, help="Max messages per chat")
     args = parser.parse_args()
@@ -89,11 +95,20 @@ async def main() -> int:
 
     # 2. Get chats: all or by keyword
     if args.all_chats:
-        result = await get_all_chats_list_impl(client)
+        result = await get_all_chats_list_impl(
+            client,
+            limit=args.limit_chats,
+            max_dialogs_to_scan=args.max_dialogs,
+        )
         chats = result.get("chats", [])
         logger.info("Loading ALL conversations: %d chats", len(chats))
     else:
-        result = await search_chats_by_keyword_impl(client, args.keyword)
+        result = await search_chats_by_keyword_impl(
+            client,
+            args.keyword,
+            limit=args.limit_chats,
+            max_dialogs_to_scan=args.max_dialogs,
+        )
         chats = result.get("chats", [])
     if not chats:
         msg = "No chats found" + (f" for keyword {args.keyword!r}" if not args.all_chats else "")

@@ -25,6 +25,7 @@ import asyncio
 from typing import Any
 
 logger = logging.getLogger(__name__)
+HEARTBEAT_INTERVAL_SECONDS = int(os.getenv("TELEGRAM_LISTENER_HEARTBEAT_SECONDS", "60"))
 
 # Only import Supabase writer when actually used
 _writer: Any = None
@@ -133,12 +134,22 @@ def register_event_handlers(client: Any) -> None:
         file=__import__("sys").stderr,
     )
 
-    async def _record_listener_boot() -> None:
+    async def _record_runtime_event(mode: str) -> None:
         try:
             writer = _get_writer()
-            run_id = await writer.start_ingest_run(mode="listener_boot")
-            await writer.finish_ingest_run(run_id, processed_chats=0, inserted_messages=0)
+            await writer.record_runtime_event(mode=mode, processed_chats=0, inserted_messages=0)
         except Exception as exc:
-            logger.warning("Failed to write listener_boot ingest marker: %s", exc)
+            logger.warning("Failed to write %s ingest marker: %s", mode, exc)
 
-    loop.create_task(_record_listener_boot())
+    async def _heartbeat_loop() -> None:
+        while True:
+            try:
+                await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+                await _record_runtime_event("listener_heartbeat")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Listener heartbeat loop failed: %s", exc)
+
+    loop.create_task(_record_runtime_event("listener_boot"))
+    loop.create_task(_heartbeat_loop())

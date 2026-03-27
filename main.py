@@ -470,10 +470,10 @@ async def _run_runtime_healthcheck() -> tuple[bool, str]:
         from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
 
         writer = SupabaseWriter(telegram_user_id=os.getenv("TELEGRAM_USER", "ikrasinsky"))
-        ok, message = await writer.ping()
+        ok, message = await writer.get_runtime_health()
         if not ok:
             return False, message
-        return True, f"Telegram LABA runtime OK: {message}"
+        return True, message
     except Exception as exc:
         return False, f"Telegram LABA runtime probe failed: {exc}"
 

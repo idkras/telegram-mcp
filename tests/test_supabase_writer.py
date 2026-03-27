@@ -8,7 +8,7 @@ Data source: Unit tests with mock Telethon message objects (no live Supabase).
 """
 import json
 import pytest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, AsyncMock, patch
 
 import sys
@@ -238,6 +238,51 @@ class TestSupabaseWriterInit:
         writer = SupabaseWriter()
         # Client should NOT be created until first access
         assert writer._client is None
+
+
+class TestRuntimeHealthEvaluation:
+    def test_runtime_health_requires_listener_heartbeat(self):
+        from heroes_platform.heroes_telegram_mcp.supabase_writer import _evaluate_runtime_health
+
+        ok, message = _evaluate_runtime_health(
+            listener_event_at=None,
+            latest_message_at=None,
+            max_staleness_seconds=180,
+            transport_message="transport ok",
+        )
+
+        assert ok is False
+        assert "no listener heartbeat" in message
+
+    def test_runtime_health_rejects_stale_heartbeat(self):
+        from heroes_platform.heroes_telegram_mcp.supabase_writer import _evaluate_runtime_health
+
+        stale = datetime.now(tz=timezone.utc) - timedelta(seconds=600)
+        ok, message = _evaluate_runtime_health(
+            listener_event_at=stale,
+            latest_message_at=None,
+            max_staleness_seconds=180,
+            transport_message="transport ok",
+        )
+
+        assert ok is False
+        assert "stale" in message
+
+    def test_runtime_health_accepts_fresh_heartbeat(self):
+        from heroes_platform.heroes_telegram_mcp.supabase_writer import _evaluate_runtime_health
+
+        fresh = datetime.now(tz=timezone.utc) - timedelta(seconds=15)
+        latest_message = datetime.now(tz=timezone.utc) - timedelta(seconds=5)
+        ok, message = _evaluate_runtime_health(
+            listener_event_at=fresh,
+            latest_message_at=latest_message,
+            max_staleness_seconds=180,
+            transport_message="transport ok",
+        )
+
+        assert ok is True
+        assert "listener heartbeat age=" in message
+        assert "latest message age=" in message
 
 
 class TestConversationsSQLView:
