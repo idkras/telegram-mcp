@@ -26,6 +26,8 @@ Prerequisites:
   - SUPABASE_API_KEY or supabase_rick_api_key in Keychain
   - SUPABASE_TELEGRAM_SCHEMA=tasks if migration used schema "tasks"
   - Telegram credentials: default from TELEGRAM_USER / Keychain; --profile lisa uses lisa_tg_* (Keychain)
+  - If direct Postgres (Keychain supabase_rick_db_url) times out but REST works: set
+    SUPABASE_TELEGRAM_USE_REST_ONLY=1 so chat upserts use Supabase REST instead of psycopg2.
 """
 from __future__ import annotations
 

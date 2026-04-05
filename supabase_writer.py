@@ -113,6 +113,10 @@ class SupabaseWriter:
         self._batch: list[dict[str, Any]] = []
         self.batch_size = 50
         self._postgres_url = postgres_url or _get_postgres_url()
+        # Direct Postgres (Keychain SUPABASE_DB_URL / supabase_rick_db_url) may be unreachable from some
+        # networks while HTTPS REST to supabase.rick.ai works — force REST upserts for chat registry.
+        if os.getenv("SUPABASE_TELEGRAM_USE_REST_ONLY", "").strip().lower() in ("1", "true", "yes"):
+            self._postgres_url = None
 
     @property
     def client(self) -> Any:
