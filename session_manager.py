@@ -74,6 +74,7 @@ def get_profile_credential_names(profile: str) -> dict[str, str]:
             "api_hash": "lisa_tg_app_hash",
             "session": "lisa_tg_session",
             "phone": "lisa_tg_phone",
+            "2fa_password": "lisa_tg_2fa_password",
         }
     elif profile_lower in ["ikrasinsky", "ilyakrasinsky", "ik"]:
         # Try new format first, fallback to default

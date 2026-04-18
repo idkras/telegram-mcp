@@ -86,11 +86,52 @@ async def main() -> None:
         except Exception:
             pass
 
-        try:
-            user = await qr_login.wait()
-        except telethon.errors.rpcerrorlist.SessionPasswordNeededError:
-            password = input("Enter Lisa 2FA password: ")
-            user = await client.sign_in(password=password)
+        # Refresh loop — Telegram QR token TTL ~30s, без recreate() любой скан после expiry = fail.
+        # RCA 2026-04-17: первый прогон без recreate() выдавал "лажовый QR" — owner не успевал отсканировать до expiry.
+        MAX_ATTEMPTS = 12  # 12 × 30s = 6 минут окно для owner
+        user = None
+        for attempt in range(MAX_ATTEMPTS):
+            try:
+                user = await asyncio.wait_for(qr_login.wait(), timeout=30)
+                break
+            except asyncio.TimeoutError:
+                await qr_login.recreate()
+                image = qrcode.make(qr_login.url)
+                image.save(qr_path)
+                url_path.write_text(qr_login.url, encoding="utf-8")
+                print(
+                    f"INFO: QR refreshed (attempt {attempt + 2}/{MAX_ATTEMPTS}), "
+                    f"expires at {qr_login.expires.isoformat()}. Открой PNG заново и сканируй."
+                )
+            except telethon.errors.rpcerrorlist.SessionPasswordNeededError:
+                print("INFO: 2FA cloud password required.")
+                # Try Keychain first (works in background/nohup without stdin).
+                password = None
+                twofa_key = names.get("2fa_password")
+                if twofa_key:
+                    try:
+                        password = _require_credential(twofa_key)
+                        print(f"INFO: 2FA password read from Keychain key '{twofa_key}'.")
+                    except RuntimeError:
+                        print(f"INFO: 2FA password not in Keychain (key '{twofa_key}' missing).")
+                # Fallback to interactive input (foreground Terminal only).
+                if not password:
+                    try:
+                        password = input("Enter Lisa 2FA password: ")
+                    except EOFError:
+                        raise RuntimeError(
+                            "2FA password required, no Keychain entry, and stdin unavailable "
+                            "(running in background?). Save password first:\n"
+                            "  security add-generic-password -s lisa_tg_2fa_password -a lisa -w '<PASSWORD>' -U"
+                        )
+                user = await client.sign_in(password=password)
+                print("INFO: 2FA password accepted, login complete.")
+                break
+        if user is None:
+            raise RuntimeError(
+                f"QR login timed out after {MAX_ATTEMPTS * 30}s без сканирования. "
+                "Запусти скрипт заново и сканируй сразу после того как PNG откроется."
+            )
 
         session_string = client.session.save()
         saved = credentials_manager.store_credential(names["session"], session_string, "keychain")
