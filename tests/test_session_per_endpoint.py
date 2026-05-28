@@ -121,3 +121,95 @@ def test_end_to_end_collision_via_env_and_keychain_form(tmp_path):
     collision, account = vspe.detect_collision(env_sha, keychain)
     assert collision is True, "copy-paste of keychain session into .env.laba must collide"
     assert account == "lisa_tg_session"
+
+
+# --- H1 fix: inline comment WITHOUT leading space (code-reviewer 2026-05-28) ----
+
+def test_normalize_strips_comment_without_leading_space():
+    # human-edited `.env` `KEY=val#c` must normalize to `val`, else false-negative
+    assert vspe._normalize("abc123#laba") == "abc123"
+
+
+def test_read_env_collision_with_no_space_comment(tmp_path):
+    secret = "SHARED=="
+    path = _write(tmp_path, f"TELEGRAM_SESSION_STRING={secret}#laba\n")
+    env_sha = vspe.read_env_session(path)
+    keychain = {"lisa_tg_session": vspe._sha(secret)}
+    collision, account = vspe.detect_collision(env_sha, keychain)
+    assert collision is True, "no-space inline comment must not hide a collision"
+
+
+# --- D1/H2 fix: enumeration None => INCONCLUSIVE, never silent false-PASS -------
+
+def test_detect_collision_none_keychain_is_not_collision():
+    # None = couldn't enumerate; detect_collision must NOT crash and NOT claim collision
+    collision, account = vspe.detect_collision(vspe._sha("X"), None)
+    assert collision is False and account == ""
+
+
+def test_main_inconclusive_when_keychain_unavailable(tmp_path, monkeypatch, capsys):
+    """laba host (no macOS Keychain): enumerate -> None -> INCONCLUSIVE, NOT PASS."""
+    path = _write(tmp_path, "TELEGRAM_SESSION_STRING=LABA_OWN==\n")
+    monkeypatch.setattr(vspe, "enumerate_keychain_sessions", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["prog", "--env-path", path])
+    monkeypatch.delenv("TG_SESSION_GUARD_STRICT", raising=False)
+    monkeypatch.delenv("TG_SESSION_REUSE_ACK", raising=False)
+    rc = vspe.main()
+    err = capsys.readouterr().err
+    assert rc == 0, "non-strict: INCONCLUSIVE must not block deploy"
+    assert "INCONCLUSIVE" in err
+    assert "PASS" not in err, "must NOT print a false PASS when enumeration impossible"
+
+
+def test_main_inconclusive_strict_blocks(tmp_path, monkeypatch):
+    path = _write(tmp_path, "TELEGRAM_SESSION_STRING=LABA_OWN==\n")
+    monkeypatch.setattr(vspe, "enumerate_keychain_sessions", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["prog", "--env-path", path, "--strict"])
+    monkeypatch.delenv("TG_SESSION_REUSE_ACK", raising=False)
+    assert vspe.main() == 2, "strict mode: INCONCLUSIVE must fail-closed (exit 2)"
+
+
+def test_main_collision_exits_2(tmp_path, monkeypatch):
+    secret = "DUP=="
+    path = _write(tmp_path, f"TELEGRAM_SESSION_STRING={secret}\n")
+    monkeypatch.setattr(
+        vspe, "enumerate_keychain_sessions",
+        lambda: {"lisa_tg_session": vspe._sha(secret)},
+    )
+    monkeypatch.setattr(sys, "argv", ["prog", "--env-path", path])
+    monkeypatch.delenv("TG_SESSION_REUSE_ACK", raising=False)
+    monkeypatch.delenv("TG_SESSION_GUARD_STRICT", raising=False)
+    assert vspe.main() == 2, "real collision must abort deploy (exit 2)"
+
+
+def test_main_distinct_exits_0(tmp_path, monkeypatch):
+    path = _write(tmp_path, "TELEGRAM_SESSION_STRING=LABA_OWN==\n")
+    monkeypatch.setattr(
+        vspe, "enumerate_keychain_sessions",
+        lambda: {"lisa_tg_session": vspe._sha("LOCAL_DIFFERENT==")},
+    )
+    monkeypatch.setattr(sys, "argv", ["prog", "--env-path", path])
+    monkeypatch.delenv("TG_SESSION_REUSE_ACK", raising=False)
+    monkeypatch.delenv("TG_SESSION_GUARD_STRICT", raising=False)
+    assert vspe.main() == 0, "distinct sessions pass"
+
+
+def test_main_no_env_session_exits_0(tmp_path, monkeypatch):
+    path = _write(tmp_path, "TELEGRAM_API_ID=1\n")
+    monkeypatch.setattr(vspe, "enumerate_keychain_sessions", lambda: {"x": "y"})
+    monkeypatch.setattr(sys, "argv", ["prog", "--env-path", path])
+    monkeypatch.delenv("TG_SESSION_REUSE_ACK", raising=False)
+    monkeypatch.delenv("TG_SESSION_GUARD_STRICT", raising=False)
+    assert vspe.main() == 0
+
+
+def test_main_ack_override_exits_0(tmp_path, monkeypatch):
+    secret = "DUP=="
+    path = _write(tmp_path, f"TELEGRAM_SESSION_STRING={secret}\n")
+    monkeypatch.setattr(
+        vspe, "enumerate_keychain_sessions",
+        lambda: {"lisa_tg_session": vspe._sha(secret)},
+    )
+    monkeypatch.setattr(sys, "argv", ["prog", "--env-path", path])
+    monkeypatch.setenv("TG_SESSION_REUSE_ACK", "intentional reuse for x reason")
+    assert vspe.main() == 0, "ACK override bypasses even a real collision"

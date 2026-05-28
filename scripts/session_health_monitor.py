@@ -15,8 +15,11 @@ NO_SESSION / NETWORK / UNKNOWN) и возвращает non-zero если хот
 — так смерть канала всплывает СРАЗУ, независимо от того, какой вектор её вызвал
 (deploy reuse, ad-hoc connect, два контейнера, перезапись Keychain).
 
-Universal: профили берутся динамически из get_profile_credential_names (lisa / ik /
-rick-coposlly-linkedinhero / default) — без hardcode одного аккаунта.
+Universal: НЕ hardcoded на один аккаунт. Список профилей — конфигурируемый
+(DEFAULT_PROFILES = lisa / ik / rick-coposlly-linkedinhero / default), полностью
+переопределяется флагом `--profiles a,b,c`. Креды каждого профиля резолвятся через
+session_manager.get_profile_credential_names(profile). Новый teammate-профиль =
+добавить в --profiles (или в DEFAULT_PROFILES), без правки логики.
 
 Usage:
     python3 session_health_monitor.py [--profiles lisa,ik] [--json] [--alert-cmd CMD]

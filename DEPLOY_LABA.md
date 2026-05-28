@@ -44,9 +44,18 @@ Agent НЕ имеет доступа: `git@git.rick.ai` (publickey denied), Bitw
    TELEGRAM_USER=lisa
    LABA_MODE=true
    ```
-3. **Деплой запустит guard автоматически** — `deploy-to-laba.sh` вызывает
-   `validate_session_per_endpoint.py` и **откажет (exit 1)**, если laba-сессия
-   совпадает с локальной Keychain-сессией. Это и есть защита от рецидива.
+3. **Авторитетная проверка — НА ЛОКАЛЬНОЙ Mac-машине ПЕРЕД отгрузкой `.env.laba`**
+   (там живут local-сессии, есть с чем сравнивать):
+   ```bash
+   # на Mac, где лежит local Keychain
+   python3 scripts/validate_session_per_endpoint.py --env-path /path/to/.env.laba
+   #   exit 2 = COLLISION (laba-строка == local) → НЕ отгружай, перегенерируй сессию
+   #   exit 0 = laba-сессия отлична от всех local → можно отгружать
+   ```
+   ⚠️ Запуск guard **на самом laba-хосте** (Linux, без macOS Keychain) вернёт
+   **INCONCLUSIVE** (сравнивать не с чем — laba и есть «другой endpoint»), НЕ
+   ложный «PASS». В preflight `deploy-to-laba.sh` это advisory (exit 0); чтобы CI
+   на laba жёстко падал при INCONCLUSIVE — `TG_SESSION_GUARD_STRICT=1`.
 
 ## Deploy
 
@@ -79,4 +88,13 @@ re-auth по шагу 1 (на том endpoint, где ключ умер).
 | runtime death detector | `scripts/session_health_monitor.py` | cron/CI: реальная смерть ключа любого профиля → alert |
 | diagnosis surface | `session_manager.test_session` | классифицирует причину (REVOKED / AUTHKEY_DUPLICATED / NETWORK / ...) |
 
-Тесты слоёв: `tests/test_session_per_endpoint.py`, `tests/test_session_health_monitor.py`.
+Тесты слоёв: `tests/test_session_per_endpoint.py`, `tests/test_session_health_monitor.py` (34 теста, pure-function, без Keychain/сети).
+
+## Остаточные риски (честно, не закрыто этим слоем)
+
+| # | Риск | Почему не закрыто сейчас | Что закроет |
+|---|---|---|---|
+| D2 | После того как laba владеет сессией аккаунта, **локальной машине ничто механически не мешает** грузить сессию того же аккаунта (если строки случайно совпали ИЛИ local перечитал старую) → снова 2 IP | Нужен write-side lock на local endpoint (local MCP при известном laba-owned аккаунте сам отказывается коннектиться ИЛИ роутит через laba) — это бОльшая архитектурная работа, отдельный bead | local MCP routes «send-as-X» через laba-сервис вместо прямого StringSession; либо local-load guard читает session-ownership manifest |
+| — | Уже-мёртвый/дублирующий auth key в Telegram «Active Sessions» не отзывается автоматически | Лечим причину (не плодить дубли), не симптом | ручной terminate в Telegram при re-auth |
+
+Эти два — следующий слой (route-through-laba). Текущие 3 слоя убирают САМ механизм рецидива (copy local→laba) + ловят смерть рантайм.

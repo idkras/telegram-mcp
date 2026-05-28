@@ -57,9 +57,12 @@ def _normalize(value: str) -> str:
     surrounding quotes + trailing inline comment.
     """
     v = value.strip()
-    # trailing inline comment (только вне кавычек; base64url не содержит '#')
+    # trailing inline comment (только вне кавычек; base64url не содержит '#',
+    # поэтому режем от ПЕРВОГО '#' — и `val # c`, и `val#c` без пробела, иначе
+    # human-edited `.env` с `KEY=val#c` давал бы другой SHA → false-negative,
+    # H1 code-reviewer 2026-05-28).
     if not (v.startswith('"') or v.startswith("'")):
-        v = v.split(" #", 1)[0].rstrip()
+        v = v.split("#", 1)[0].rstrip()
     v = v.strip().strip('"').strip("'").strip()
     return v
 
@@ -68,12 +71,21 @@ def _sha(value: str) -> str:
     return hashlib.sha256(_normalize(value).encode("utf-8")).hexdigest()
 
 
-def enumerate_keychain_sessions() -> dict[str, str]:
+def enumerate_keychain_sessions() -> dict[str, str] | None:
     """Все Keychain `*_tg_session` / `telegram_session` → {account: sha256}.
 
     Имена ключей берутся динамически из `security dump-keychain` (только svce),
     значения — через `security find-generic-password -w`. Секрет не возвращается,
-    только sha256. Если `security` недоступен (не macOS) → пустой dict.
+    только sha256.
+
+    Возврат (D1/H2 fix, design+code reviewer 2026-05-28 — НИКОГДА silent false-green):
+      - dict  — `security` отработал, перечислены 0+ локальных сессий (пустой dict =
+                достоверно «локальных сессий нет»);
+      - None  — `security` НЕДОСТУПЕН (не macOS / laba-хост / нет бинаря) → перечислить
+                невозможно → НЕ выдавать «PASS distinct from 0», а сигналить INCONCLUSIVE.
+    Это закрывает дыру: на laba-хосте Keychain нет → раньше `{}` → guard был no-op
+    именно там где идёт deploy (false confidence). Авторитетный запуск guard — на
+    ЛОКАЛЬНОЙ машине (где живут local-сессии) ПЕРЕД отгрузкой .env.laba.
     """
     out: dict[str, str] = {}
     try:
@@ -82,7 +94,7 @@ def enumerate_keychain_sessions() -> dict[str, str]:
             capture_output=True, text=True, timeout=30,
         ).stdout
     except (OSError, subprocess.SubprocessError):
-        return out
+        return None  # couldn't enumerate — INCONCLUSIVE, not "0 sessions"
     # Известное ограничение (C1, code-reviewer 2026-05-28): `find-generic-password
     # -s NAME -w` возвращает значение ТОЛЬКО первого item при дублях service name
     # (login + iCloud keychain). Если у аккаунта два item с одним svce, реальная
@@ -126,10 +138,14 @@ def read_env_session(env_path: str) -> str | None:
 
 
 def detect_collision(
-    env_sha: str | None, keychain_shas: dict[str, str]
+    env_sha: str | None, keychain_shas: dict[str, str] | None
 ) -> tuple[bool, str]:
-    """True + имя совпавшего keychain-аккаунта, если laba-сессия = локальной."""
-    if not env_sha:
+    """True + имя совпавшего keychain-аккаунта, если laba-сессия = локальной.
+
+    keychain_shas=None (перечислить нельзя) → (False, "") — НЕ коллизия, но и НЕ
+    доказанная distinctness; решение INCONCLUSIVE принимает main() по None отдельно.
+    """
+    if not env_sha or not keychain_shas:
         return False, ""
     for account, sha in keychain_shas.items():
         if sha == env_sha:
@@ -159,13 +175,35 @@ FIX (Telegram допускает N параллельных долгоживущ
 Намеренный reuse (не рекомендуется — вернёт инцидент): {ack}="<reason ≥{min} chars>"."""
 
 
+STRICT_ENV = "TG_SESSION_GUARD_STRICT"
+
+INCONCLUSIVE = """\
+session-per-endpoint: INCONCLUSIVE — нельзя перечислить локальные сессии на этом хосте.
+
+`security` (macOS Keychain) недоступен → сравнить laba-сессию (.env.laba, sha {env8})
+не с чем. Это НЕ значит «коллизий нет» — это значит проверка здесь бессильна (laba —
+Linux-хост, у него нет local Keychain; он и есть «другой endpoint»).
+
+ПРАВИЛЬНО: запусти guard на ЛОКАЛЬНОЙ Mac-машине (где живут local-сессии) ПЕРЕД
+отгрузкой .env.laba на laba:
+    python3 scripts/validate_session_per_endpoint.py --env-path /path/to/.env.laba
+Там сравнение авторитетно. Здесь (на laba preflight) — лишь advisory.
+
+Fail-closed на этом хосте (CI хочет жёсткий блок при INCONCLUSIVE): {strict}=1 → exit 2."""
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--env-path",
         default=str(Path(__file__).resolve().parent.parent / ".env.laba"),
     )
+    parser.add_argument(
+        "--strict", action="store_true",
+        help=f"INCONCLUSIVE → exit 2 (также через env {STRICT_ENV}=1)",
+    )
     args = parser.parse_args()
+    strict = args.strict or os.environ.get(STRICT_ENV, "").strip() not in ("", "0")
 
     ack = os.environ.get(ACK_ENV, "")
     if len(ack.strip()) >= ACK_MIN:
@@ -186,6 +224,10 @@ def main() -> int:
             file=sys.stderr,
         )
         return 0
+    # D1/H2 fix: keychain is None → перечислить нельзя → INCONCLUSIVE, НЕ false-PASS.
+    if keychain is None:
+        print(INCONCLUSIVE.format(env8=env_sha[:8], strict=STRICT_ENV), file=sys.stderr)
+        return 2 if strict else 0
     if not collision:
         print(
             f"session-per-endpoint: PASS — laba session distinct from "
