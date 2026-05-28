@@ -211,11 +211,19 @@ async def create_telegram_session(
 async def test_session(profile: str) -> tuple[bool, Optional[str]]:
     """Test if session exists and is valid for a profile.
 
+    Surfaces the *real* failure reason instead of silently returning False.
+    Без этого протухание сессии всегда выглядело как абстрактное "expired",
+    и нельзя было отличить главную причину рецидива (AuthKeyDuplicated —
+    одна сессия с двух IP) от ручного logout или сетевой ошибки.
+    RCA 2026-05-28: lisa_tg_session keeps getting revoked.
+
     Args:
         profile: Profile name
 
     Returns:
-        tuple: (is_valid: bool, user_info: Optional[str])
+        tuple: (is_valid: bool, info_or_diagnosis: Optional[str])
+            success → user_info; failure → diagnosis prefixed with reason code,
+            one of: NO_SESSION / REVOKED / AUTHKEY_DUPLICATED / NETWORK / UNKNOWN.
     """
     credential_names = get_profile_credential_names(profile)
 
@@ -225,28 +233,45 @@ async def test_session(profile: str) -> tuple[bool, Optional[str]]:
     session_result = credentials_manager.get_credential(credential_names["session"])
 
     if not api_id_result.success or not api_hash_result.success:
-        return False, None
+        return False, "NO_SESSION: api_id/api_hash credentials missing in Keychain"
 
     if not session_result.success or not session_result.value:
-        return False, None
+        return False, "NO_SESSION: session string missing in Keychain"
 
     api_id = int(api_id_result.value) if api_id_result.value else 0
     api_hash = api_hash_result.value
     session_string = session_result.value
 
-    # Test session
+    client = TelegramClient(StringSession(session_string), api_id, api_hash)
     try:
-        session = StringSession(session_string)
-        client = TelegramClient(session, api_id, api_hash)
         await client.connect()
 
         if await client.is_user_authorized():
             me = await client.get_me()
             user_info = f"{me.first_name} {me.last_name or ''} (@{me.username or 'no username'})"
-            await client.disconnect()
             return True, user_info
-        else:
+
+        # connect() ok, but server says not authorized → key revoked server-side
+        # (manual logout in Active Sessions, or after-effect of AuthKeyDuplicated).
+        return False, (
+            "REVOKED: connect ok but Telegram returns is_user_authorized=False — "
+            "auth key revoked server-side. Re-auth required (see update_*_session.py)."
+        )
+    except telethon.errors.rpcerrorlist.AuthKeyDuplicatedError as e:
+        return False, (
+            "AUTHKEY_DUPLICATED: the same session string was used from two IPs "
+            "simultaneously (e.g. local + laba container) and is permanently dead. "
+            "Fix: give each endpoint its OWN session string. "
+            f"Telethon: {e}"
+        )
+    except telethon.errors.rpcerrorlist.AuthKeyUnregisteredError as e:
+        return False, f"REVOKED: auth key unregistered (logged out). Telethon: {e}"
+    except (ConnectionError, OSError, asyncio.TimeoutError) as e:
+        return False, f"NETWORK: cannot reach Telegram (transient, retry). {type(e).__name__}: {e}"
+    except Exception as e:
+        return False, f"UNKNOWN: {type(e).__name__}: {e}"
+    finally:
+        try:
             await client.disconnect()
-            return False, None
-    except Exception:
-        return False, None
+        except Exception:
+            pass
