@@ -76,6 +76,22 @@ preflight() {
         log_warn "Some environment variables may be missing. Deployment may fail."
     fi
 
+    # Session-per-endpoint guard (RCA 2026-05-28 AuthKeyDuplicated): laba session
+    # string MUST differ from any local Keychain *_tg_session, иначе один auth key
+    # с двух IP → Telegram навсегда убьёт сессию. exit 2 → abort deploy.
+    log_info "Checking session-per-endpoint (no reuse of local session)..."
+    if command -v python3 &> /dev/null; then
+        if ! python3 "$SCRIPT_DIR/validate_session_per_endpoint.py" --env-path "$PROJECT_DIR/.env.laba"; then
+            log_error "Session-per-endpoint collision — laba reuses a LOCAL session."
+            log_error "Generate a SEPARATE session for laba (scripts/update_session.py),"
+            log_error "put it ONLY in .env.laba (not in Keychain). Aborting deploy."
+            log_error "Intentional override: export TG_SESSION_REUSE_ACK=\"<reason ≥12 chars>\""
+            exit 1
+        fi
+    else
+        log_warn "python3 not found — skipping session-per-endpoint guard."
+    fi
+
     log_info "Pre-flight checks passed."
 }
 
