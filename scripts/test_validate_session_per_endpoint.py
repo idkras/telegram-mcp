@@ -98,5 +98,72 @@ def test_e2e_ack_env_passes_even_on_collision(monkeypatch=None):
     os.unlink(p)
 
 
+# ---------- review-fix tests (RCA 2026-05-28 reviewer findings) ----------
+def test_quote_symmetry_keychain_vs_env():
+    # H2: quoted keychain value vs unquoted env value = same logical session
+    assert vspe._sha('"SESSION_X"') == vspe._sha("SESSION_X")
+    assert vspe._sha("'SESSION_X'") == vspe._sha("SESSION_X")
+
+
+def test_trailing_newline_whitespace_normalized():
+    assert vspe._sha("SESSION_X\n") == vspe._sha("SESSION_X")
+    assert vspe._sha("  SESSION_X  ") == vspe._sha("SESSION_X")
+
+
+def test_export_prefix_parsed():
+    # H3: `export TELEGRAM_SESSION_STRING=...` must be read (manual .env edit)
+    fd, p = tempfile.mkstemp(suffix=".env")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write("export TELEGRAM_SESSION_STRING=SESSABC\n")
+    assert vspe.read_env_session(p) == vspe._sha("SESSABC")
+    os.unlink(p)
+
+
+def test_inline_comment_stripped():
+    # H3: `X=val # laba` — comment must not change the hash
+    fd, p = tempfile.mkstemp(suffix=".env")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write("TELEGRAM_SESSION_STRING=SESSABC # laba endpoint\n")
+    assert vspe.read_env_session(p) == vspe._sha("SESSABC")
+    os.unlink(p)
+
+
+def test_collision_detected_despite_quote_asymmetry():
+    # end-to-end of H2: env quoted, keychain-side unquoted → still collision
+    kc = {"lisa_tg_session": vspe._sha("SESSABC")}
+    env_sha = vspe.read_env_session(_write_env('"SESSABC"'))
+    collision, account = vspe.detect_collision(env_sha, kc)
+    assert collision is True and account == "lisa_tg_session"
+
+
+# ---------- session_health_monitor classify ----------
+def _load_monitor():
+    mp = Path(__file__).resolve().parent / "session_health_monitor.py"
+    s = importlib.util.spec_from_file_location("shm", mp)
+    m = importlib.util.module_from_spec(s)
+    s.loader.exec_module(m)
+    return m
+
+
+def test_monitor_classify_codes():
+    m = _load_monitor()
+    assert m.classify("AUTHKEY_DUPLICATED: ...") == "AUTHKEY_DUPLICATED"
+    assert m.classify("REVOKED: logged out") == "REVOKED"
+    assert m.classify("NETWORK: timeout") == "NETWORK"
+    assert m.classify(None) == "UNKNOWN"
+    assert m.classify("weird text no colon") == "UNKNOWN"
+
+
+def test_monitor_dead_excludes_network():
+    m = _load_monitor()
+    results = [
+        {"profile": "lisa", "ok": False, "code": "AUTHKEY_DUPLICATED", "detail": ""},
+        {"profile": "ik", "ok": False, "code": "NETWORK", "detail": ""},
+        {"profile": "default", "ok": True, "code": "OK", "detail": ""},
+    ]
+    dead = m.dead_profiles(results)
+    assert [d["profile"] for d in dead] == ["lisa"]  # NETWORK не считается смертью
+
+
 if __name__ == "__main__":
     sys.exit(subprocess.call([sys.executable, "-m", "pytest", __file__, "-v"]))

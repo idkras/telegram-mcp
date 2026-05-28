@@ -40,11 +40,32 @@ from pathlib import Path
 ACK_ENV = "TG_SESSION_REUSE_ACK"
 ACK_MIN = 12
 _SESSION_KEY_RE = re.compile(r".*_tg_session$|^telegram_session$")
-_ENV_SESSION_RE = re.compile(r"^\s*TELEGRAM_SESSION_STRING\s*=\s*(.+?)\s*$")
+# `export `-префикс + опциональный inline-комментарий (H3, code-reviewer 2026-05-28):
+# человек правит .env.laba руками → `export X=...` / `X=... # laba` иначе не матчились
+# → guard молча отключался. StringSession = base64url, `#` в значение не входит,
+# поэтому отрезание trailing ` #...` безопасно.
+_ENV_SESSION_RE = re.compile(
+    r"^\s*(?:export\s+)?TELEGRAM_SESSION_STRING\s*=\s*(.+?)\s*$"
+)
+
+
+def _normalize(value: str) -> str:
+    """Единая нормализация для ОБЕИХ сторон (H2 symmetric, code-reviewer 2026-05-28).
+
+    Раньше env-сторона снимала кавычки, keychain — нет → логически одна сессия
+    давала разные SHA → false-negative. Теперь обе стороны: strip whitespace +
+    surrounding quotes + trailing inline comment.
+    """
+    v = value.strip()
+    # trailing inline comment (только вне кавычек; base64url не содержит '#')
+    if not (v.startswith('"') or v.startswith("'")):
+        v = v.split(" #", 1)[0].rstrip()
+    v = v.strip().strip('"').strip("'").strip()
+    return v
 
 
 def _sha(value: str) -> str:
-    return hashlib.sha256(value.strip().encode("utf-8")).hexdigest()
+    return hashlib.sha256(_normalize(value).encode("utf-8")).hexdigest()
 
 
 def enumerate_keychain_sessions() -> dict[str, str]:
@@ -62,6 +83,13 @@ def enumerate_keychain_sessions() -> dict[str, str]:
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return out
+    # Известное ограничение (C1, code-reviewer 2026-05-28): `find-generic-password
+    # -s NAME -w` возвращает значение ТОЛЬКО первого item при дублях service name
+    # (login + iCloud keychain). Если у аккаунта два item с одним svce, реальная
+    # коллизионная пара может быть во втором → false-negative. Перечисление всех
+    # значений per service требует `dump-keychain -d` (запрашивает пароль) —
+    # неприемлемо в CI/deploy preflight. Мера: runtime session_health_monitor.py
+    # ловит реальную смерть ключа независимо от этого статического сравнения.
     names: set[str] = set()
     for m in re.finditer(r'"svce"<blob>="([^"]*)"', dump):
         name = m.group(1)
@@ -89,9 +117,9 @@ def read_env_session(env_path: str) -> str | None:
         for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
             m = _ENV_SESSION_RE.match(line)
             if m:
-                raw = m.group(1).strip().strip('"').strip("'")
-                if raw:
-                    return _sha(raw)
+                # _sha сам нормализует (symmetric с keychain-стороной) — не pre-strip
+                if _normalize(m.group(1)):
+                    return _sha(m.group(1))
     except OSError:
         return None
     return None
@@ -117,14 +145,18 @@ session-per-endpoint: COLLISION — laba session reuses local session «{account
 auth key (AuthKeyDuplicatedError). Это корень рецидива «токен Лизы опять протух»
 (RCA 2026-05-28 ai.incidents.md).
 
-FIX (Telegram допускает N параллельных сессий на аккаунт):
-  1. Сгенерируй ОТДЕЛЬНУЮ session string для laba endpoint:
-       python3 scripts/update_session.py   # авторизуйся → новая строка
-  2. Положи её ТОЛЬКО в .env.laba (НЕ в Keychain *_tg_session, который читает
-     локальный MCP). Локальная и laba сессии обязаны быть РАЗНЫМИ.
-  3. Перезапусти deploy.
+FIX (Telegram допускает N параллельных долгоживущих сессий на аккаунт):
+  1. Re-auth даёт НОВУЮ session string (нужен SMS/Telegram-код на телефон
+     аккаунта — owner/Lisa effort). Канонический скрипт re-auth:
+       python3 update_lisa_session.py        # для профиля lisa
+       python3 update_lisa_session_via_qr.py # QR-вариант
+     ⚠️ Эти скрипты сохраняют новую строку в Keychain (для ЛОКАЛЬНОГО MCP).
+  2. Для laba endpoint нужна ОТДЕЛЬНАЯ session string, НЕ та что в Keychain.
+     Сгенерируй вторую сессию (повторный re-auth) и положи её ТОЛЬКО в .env.laba.
+     Локальная (Keychain) и laba (.env.laba) сессии обязаны быть РАЗНЫМИ.
+  3. Перезапусти deploy. Runtime-смерть ключа ловит session_health_monitor.py.
 
-Намеренный reuse (не рекомендуется): export {ack}="<reason ≥{min} chars>"."""
+Намеренный reuse (не рекомендуется — вернёт инцидент): {ack}="<reason ≥{min} chars>"."""
 
 
 def main() -> int:

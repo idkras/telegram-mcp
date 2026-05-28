@@ -117,6 +117,7 @@ stop() {
 }
 
 restart() {
+    preflight   # session-per-endpoint guard также на restart (design-review 2026-05-28)
     log_info "Restarting $SERVICE_NAME..."
     docker compose -f "$COMPOSE_FILE" restart
     log_info "$SERVICE_NAME restarted."
