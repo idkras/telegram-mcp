@@ -20,6 +20,7 @@ TDD Documentation Standard v2.5 Compliance:
 """
 
 import asyncio
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -48,50 +49,115 @@ def _sent_code_type_name(sent_code_type: object) -> str:
     return type(sent_code_type).__name__ if sent_code_type is not None else "Unknown"
 
 
-def get_profile_credential_names(profile: str) -> dict[str, str]:
-    """Get credential names for a specific Telegram profile.
+# ── Profile → credential-name resolution (universal, config-driven) ──
+#
+# Generalization-first gate (AGENTS.md): добавление НОВОГО клиента обязано быть
+# правкой config/Keychain, НЕ правкой Python-кода (Q4 = YES). Поэтому:
+#   1. Легаси-профили с исторически непоследовательными именами ключей
+#      (lisa: api_key/app_hash; ik: ik_tg_*; default: telegram_*) — в явной
+#      _PROFILE_OVERRIDES таблице, чтобы НЕ протухли существующие Keychain-записи.
+#   2. Любой НОВЫЙ профиль резолвится по конвенции {slug}_tg_{field} —
+#      zero code change. Новый клиент = просто записать ключи в Keychain
+#      по конвенции + указать TELEGRAM_USER=<имя>.
+
+_PROFILE_ALIASES: dict[str, str] = {
+    "ilyakrasinsky": "ikrasinsky",
+    "ik": "ikrasinsky",
+}
+
+# Канонический набор полей. None = у профиля нет такого ключа.
+_PROFILE_OVERRIDES: dict[str, dict[str, Optional[str]]] = {
+    "lisa": {
+        "api_id": "lisa_tg_api_key",
+        "api_hash": "lisa_tg_app_hash",
+        "session": "lisa_tg_session",
+        "phone": "lisa_tg_phone",
+        "2fa_password": "lisa_tg_2fa_password",
+    },
+    "ikrasinsky": {
+        "api_id": "ik_tg_api_id",
+        "api_hash": "ik_tg_api_hash",
+        "session": "ik_tg_session",
+        "phone": "ik_tg_phone",
+    },
+    "rick-coposlly-linkedinhero": {
+        "api_id": "rick_coposlly_linkedinhero_api_id",
+        "api_hash": "rick_coposlly_linkedinhero_api_hash",
+        "session": "rick_coposlly_linkedinhero_session",
+        "phone": "rick_coposlly_linkedinhero_phone",
+    },
+    # default / "" → исторические telegram_* ключи (ikrasinsky legacy fallback)
+    "default": {
+        "api_id": "telegram_api_id",
+        "api_hash": "telegram_api_hash",
+        "session": "telegram_session",
+        "phone": None,
+    },
+}
+
+
+def _slugify_profile(profile: str) -> str:
+    """Normalize an arbitrary profile/client name to a safe snake_case slug.
+
+    'my-client' → 'my_client'; 'Smokeway Co' → 'smokeway_co';
+    'vipavenue.ru' → 'vipavenue_ru'; '  Typhoon--Coffee  ' → 'typhoon_coffee'.
+    Любой не-[a-z0-9] символ → '_', схлопывание повторов, обрезка краёв.
+    Не-latin (кириллица/emoji) → отбрасывается; если slug пустой — caller
+    обязан обработать (см. get_profile_credential_names fail-fast).
+    """
+    slug = re.sub(r"[^a-z0-9]+", "_", profile.strip().lower())
+    return slug.strip("_")
+
+
+def get_profile_credential_names(profile: str) -> dict[str, Optional[str]]:
+    """Get credential names for a Telegram profile (universal, config-driven).
 
     📚 SEE: heroes_platform/shared/credentials_wrapper.py for profile mapping logic
 
+    ⚠️ Контракт безопасности (security review 2026-06-01): `profile` ОБЯЗАН
+    приходить из доверенного источника (operator-config / TELEGRAM_USER env),
+    НЕ из сетевого ввода без allowlist — иначе вызов с profile="lisa" вернёт
+    реальные ключи Лизы (cross-account session read). Имена в _PROFILE_OVERRIDES
+    зарезервированы и не могут переиспользоваться для новых клиентов без миграции.
+
     Args:
-        profile: Profile name (ikrasinsky, lisa, rick-coposlly-linkedinhero)
+        profile: Profile/client name. Легаси (ikrasinsky/lisa/rick-coposlly-linkedinhero/
+            default) резолвятся через _PROFILE_OVERRIDES (backward compatible);
+            любой новый клиент — по конвенции {slug}_tg_{field}.
 
     Returns:
-        dict with credential names: api_id, api_hash, session, phone
-    """
-    profile_lower = profile.lower()
+        dict with credential names: api_id, api_hash, session, phone, 2fa_password.
+        Возвращается СВЕЖИЙ dict на каждый вызов (мутация не протекает).
 
-    if profile_lower == "rick-coposlly-linkedinhero":
-        return {
-            "api_id": "rick_coposlly_linkedinhero_api_id",
-            "api_hash": "rick_coposlly_linkedinhero_api_hash",
-            "session": "rick_coposlly_linkedinhero_session",
-            "phone": "rick_coposlly_linkedinhero_phone",
-        }
-    elif profile_lower == "lisa":
-        return {
-            "api_id": "lisa_tg_api_key",
-            "api_hash": "lisa_tg_app_hash",
-            "session": "lisa_tg_session",
-            "phone": "lisa_tg_phone",
-            "2fa_password": "lisa_tg_2fa_password",
-        }
-    elif profile_lower in ["ikrasinsky", "ilyakrasinsky", "ik"]:
-        # Try new format first, fallback to default
-        return {
-            "api_id": "ik_tg_api_id",  # Fallback to telegram_api_id in wrapper
-            "api_hash": "ik_tg_api_hash",  # Fallback to telegram_api_hash in wrapper
-            "session": "ik_tg_session",  # Fallback to telegram_session in wrapper
-            "phone": "ik_tg_phone",
-        }
-    else:
-        # Default profile (ikrasinsky)
-        return {
-            "api_id": "telegram_api_id",
-            "api_hash": "telegram_api_hash",
-            "session": "telegram_session",
-            "phone": None,  # No phone credential for default
-        }
+    Raises:
+        ValueError: если profile после нормализации даёт пустой slug
+            (whitespace/symbols/non-latin only) — fail-fast вместо silent
+            `_tg_session` namespace-collision (security finding 2026-06-01).
+    """
+    normalized = (profile or "").strip().lower()
+    if not normalized:
+        normalized = "default"
+
+    key = _PROFILE_ALIASES.get(normalized, normalized)
+    if key in _PROFILE_OVERRIDES:
+        return dict(_PROFILE_OVERRIDES[key])
+
+    # Универсальная конвенция — НОВЫЙ клиент без правки кода.
+    slug = _slugify_profile(profile)
+    if not slug:
+        raise ValueError(
+            f"Cannot derive a safe Keychain slug from profile {profile!r} "
+            "(empty after normalization — whitespace/symbols/non-latin only). "
+            "Use a latin-alphanumeric profile name or add an explicit "
+            "_PROFILE_OVERRIDES entry."
+        )
+    return {
+        "api_id": f"{slug}_tg_api_id",
+        "api_hash": f"{slug}_tg_api_hash",
+        "session": f"{slug}_tg_session",
+        "phone": f"{slug}_tg_phone",
+        "2fa_password": f"{slug}_tg_2fa_password",
+    }
 
 
 async def create_telegram_session(
