@@ -3359,6 +3359,37 @@ if __name__ == "__main__":
 
             # Register Supabase event handlers when running on laba
             if os.getenv("LABA_MODE") == "true":
+                # S1 preflight (RCA 2026-06-01): НЕ запускать listener на мёртвой
+                # сессии — иначе получаем zombie listener, который пишет 0 строк
+                # (ровно как 24 апр 2026: listener_boot processed 0 chats, а supabase
+                # молча застыл 38 дней). Fail-fast → контейнер рестартует / алертит.
+                try:
+                    authorized = await client.is_user_authorized()  # type: ignore
+                except Exception as auth_err:
+                    print(
+                        f"❌ LABA_MODE preflight: is_user_authorized() raised {auth_err}. "
+                        "Refusing to start listener.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
+                if not authorized:
+                    print(
+                        "❌ LABA_MODE preflight: session NOT authorized (revoked/expired/"
+                        "AuthKeyDuplicated). Re-auth required (scripts/update_*_session.py). "
+                        "Refusing to start a dead listener that would write 0 rows.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
+                try:
+                    me = await client.get_me()  # type: ignore
+                    who = getattr(me, "username", None) or getattr(me, "id", "?")
+                    print(f"✅ LABA_MODE preflight: authorized as {who} — starting listener.", file=sys.stderr)
+                except Exception as me_err:
+                    print(
+                        f"❌ LABA_MODE preflight: get_me() failed ({me_err}). Refusing to start listener.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
                 try:
                     from heroes_platform.heroes_telegram_mcp.event_handlers import (
                         register_event_handlers,
