@@ -28,8 +28,72 @@ from typing import Any, Iterator
 logger = logging.getLogger(__name__)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://supabase.rick.ai")
-# Use "tasks" if you applied apply_telegram_migrations_to_supabase_rick.sql as-is
-SUPABASE_SCHEMA = os.getenv("SUPABASE_TELEGRAM_SCHEMA", "rick_messages_tasks")
+
+# ── Schema-per-profile resolution (RCA 2026-06-05, owner directive) ──
+#
+# Каждый Telegram-аккаунт пишет в СВОЮ схему — данные не смешиваются, и менеджерам
+# выдаётся доступ одним грантом на схему Лизы (GRANT USAGE ON SCHEMA tg_lisa).
+#
+# Generalization-first gate (AGENTS.md): новый 3-й аккаунт = запись ключей в Keychain
+# + TELEGRAM_USER=<имя> → схема tg_<slug>. Ноль правок Python-кода (Q4=YES).
+#   1. Legacy ikrasinsky ОСТАЁТСЯ в rick_messages_tasks — туда смотрят все читатели
+#      (n8n-бот V6jDG342xMRR5SwU, скилы 8-rick-clients-chats-supabase-search /
+#      7-client-conversation-rag-first) + там уже лежат его данные. Переименование
+#      сломало бы read-side по всему workspace.
+#   2. Любой новый профиль → конвенция tg_{slug} (без правки кода).
+# Канон slug совпадает с session_manager._slugify_profile (snake_case, latin-only).
+_SCHEMA_PROFILE_OVERRIDES: dict[str, str] = {
+    "ikrasinsky": "rick_messages_tasks",
+    "ilyakrasinsky": "rick_messages_tasks",
+    "ik": "rick_messages_tasks",
+    "lisa": "tg_lisa",
+}
+
+
+def _slugify_profile(profile: str) -> str:
+    """Normalize profile/client name to a safe snake_case Postgres-identifier slug.
+
+    Mirror of session_manager._slugify_profile so schema name и credential-имена
+    выводятся из одного и того же правила.
+    """
+    import re
+
+    slug = re.sub(r"[^a-z0-9]+", "_", (profile or "").strip().lower())
+    return slug.strip("_")
+
+
+def _schema_for_profile(profile: str) -> str:
+    """Resolve Supabase schema name for a Telegram profile (universal, config-driven).
+
+    Env SUPABASE_TELEGRAM_SCHEMA — hard override (operator знает, что задал per-process).
+    Legacy профили → _SCHEMA_PROFILE_OVERRIDES (backward compatible).
+    Любой новый профиль → tg_{slug}.
+
+    Raises:
+        ValueError: если slug пустой (whitespace/symbols/non-latin) — fail-fast
+            вместо silent `tg_` namespace-collision.
+    """
+    env_override = os.getenv("SUPABASE_TELEGRAM_SCHEMA")
+    if env_override:
+        return env_override
+
+    normalized = (profile or "").strip().lower()
+    if normalized in _SCHEMA_PROFILE_OVERRIDES:
+        return _SCHEMA_PROFILE_OVERRIDES[normalized]
+
+    slug = _slugify_profile(profile)
+    if not slug:
+        raise ValueError(
+            f"Cannot derive a safe Supabase schema slug from profile {profile!r} "
+            "(empty after normalization). Use a latin-alphanumeric profile name "
+            "or add an explicit _SCHEMA_PROFILE_OVERRIDES entry."
+        )
+    return f"tg_{slug}"
+
+
+# Backward-compat module-level default (ikrasinsky). Per-instance schema всегда
+# берётся из self.schema (см. SupabaseWriter.__init__) — НЕ из этой константы.
+SUPABASE_SCHEMA = _schema_for_profile("ikrasinsky")
 TABLE_MESSAGES = "telegram_messages_raw"
 TABLE_CHATS = "telegram_chats"
 TABLE_CHAT_STATE = "telegram_chat_state"
@@ -110,6 +174,8 @@ class SupabaseWriter:
     ) -> None:
         self._client: Any | None = None
         self.telegram_user_id = telegram_user_id
+        # Schema-per-profile: каждый аккаунт пишет в свою схему (data не смешивается).
+        self.schema = _schema_for_profile(telegram_user_id)
         self._batch: list[dict[str, Any]] = []
         self.batch_size = 50
         self._postgres_url = postgres_url or _get_postgres_url()
@@ -126,8 +192,8 @@ class SupabaseWriter:
         return self._client
 
     def _table(self, name: str) -> Any:
-        """Table reference in rick_messages_tasks schema (same as rick_clients_tasks)."""
-        return self.client.schema(SUPABASE_SCHEMA).from_(name)
+        """Table reference in this profile's schema (schema-per-profile)."""
+        return self.client.schema(self.schema).from_(name)
 
     async def ping(self) -> tuple[bool, str]:
         """Verify that the configured Supabase transport is reachable.
@@ -147,7 +213,7 @@ class SupabaseWriter:
                 return True, "Supabase Postgres reachable"
 
             self._table(TABLE_RUNS).select("run_id").limit(1).execute()
-            return True, f"Supabase REST reachable ({SUPABASE_SCHEMA}.{TABLE_RUNS})"
+            return True, f"Supabase REST reachable ({self.schema}.{TABLE_RUNS})"
         except Exception as exc:
             return False, f"Supabase probe failed: {exc}"
 
@@ -196,9 +262,9 @@ class SupabaseWriter:
         cur = conn.cursor()
         try:
             cur.execute(
-                """
+                f"""
                 SELECT started_at
-                FROM rick_messages_tasks.telegram_ingest_runs
+                FROM {self.schema}.telegram_ingest_runs
                 WHERE telegram_user_id=%s
                   AND mode = ANY(%s)
                 ORDER BY started_at DESC
@@ -210,9 +276,9 @@ class SupabaseWriter:
             listener_event_at = _coerce_datetime(runtime_row[0]) if runtime_row else None
 
             cur.execute(
-                """
+                f"""
                 SELECT created_at
-                FROM rick_messages_tasks.telegram_messages_raw
+                FROM {self.schema}.telegram_messages_raw
                 WHERE telegram_user_id=%s
                 ORDER BY created_at DESC
                 LIMIT 1
@@ -315,8 +381,8 @@ class SupabaseWriter:
 
     def _write_message_pg(self, conn: Any, row: dict[str, Any]) -> bool:
         """Single message upsert via direct Postgres."""
-        q = """
-        INSERT INTO rick_messages_tasks.telegram_messages_raw
+        q = f"""
+        INSERT INTO {self.schema}.telegram_messages_raw
         (source, telegram_user_id, chat_id, chat_type, message_id,
          sender_user_id, sender_name, sender_username, message_ts, text, raw)
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
@@ -353,8 +419,8 @@ class SupabaseWriter:
 
     def _write_messages_batch_pg(self, conn: Any, rows: list[dict[str, Any]]) -> int:
         """Batch upsert via direct Postgres."""
-        q = """
-        INSERT INTO rick_messages_tasks.telegram_messages_raw
+        q = f"""
+        INSERT INTO {self.schema}.telegram_messages_raw
         (source, telegram_user_id, chat_id, chat_type, message_id,
          sender_user_id, sender_name, sender_username, message_ts, text, raw)
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
@@ -478,8 +544,8 @@ class SupabaseWriter:
         cur = conn.cursor()
         try:
             cur.execute(
-                """
-                INSERT INTO rick_messages_tasks.telegram_chats
+                f"""
+                INSERT INTO {self.schema}.telegram_chats
                 (chat_id, chat_type, chat_title, chat_username, is_active)
                 VALUES (%s,%s,%s,%s,TRUE)
                 ON CONFLICT (chat_id) DO UPDATE SET
@@ -527,8 +593,8 @@ class SupabaseWriter:
         cur = conn.cursor()
         try:
             cur.execute(
-                """
-                INSERT INTO rick_messages_tasks.telegram_chat_state
+                f"""
+                INSERT INTO {self.schema}.telegram_chat_state
                 (telegram_user_id, chat_id, is_active)
                 VALUES (%s,%s,TRUE)
                 ON CONFLICT (telegram_user_id, chat_id) DO NOTHING
@@ -556,8 +622,8 @@ class SupabaseWriter:
             self._ensure_chat_state_pg(conn, chat_id)
             if last_seen_message_id is not None:
                 cur.execute(
-                    """
-                    UPDATE rick_messages_tasks.telegram_chat_state
+                    f"""
+                    UPDATE {self.schema}.telegram_chat_state
                     SET last_seen_message_id=%s, last_seen_ts=%s
                     WHERE telegram_user_id=%s AND chat_id=%s
                     """,
@@ -565,8 +631,8 @@ class SupabaseWriter:
                 )
             if last_backfill_message_id is not None:
                 cur.execute(
-                    """
-                    UPDATE rick_messages_tasks.telegram_chat_state
+                    f"""
+                    UPDATE {self.schema}.telegram_chat_state
                     SET last_backfill_message_id=%s, last_backfill_ts=%s
                     WHERE telegram_user_id=%s AND chat_id=%s
                     """,
@@ -574,8 +640,8 @@ class SupabaseWriter:
                 )
             if backfill_completed is not None:
                 cur.execute(
-                    """
-                    UPDATE rick_messages_tasks.telegram_chat_state
+                    f"""
+                    UPDATE {self.schema}.telegram_chat_state
                     SET backfill_completed=%s
                     WHERE telegram_user_id=%s AND chat_id=%s
                     """,
@@ -640,9 +706,9 @@ class SupabaseWriter:
         cur = conn.cursor()
         try:
             cur.execute(
-                """
+                f"""
                 SELECT *
-                FROM rick_messages_tasks.telegram_chat_state
+                FROM {self.schema}.telegram_chat_state
                 WHERE telegram_user_id=%s AND chat_id=%s
                 LIMIT 1
                 """,
@@ -692,7 +758,7 @@ class SupabaseWriter:
         cur = conn.cursor()
         try:
             cur.execute(
-                "SELECT * FROM rick_messages_tasks.telegram_chats WHERE chat_id=%s LIMIT 1",
+                f"SELECT * FROM {self.schema}.telegram_chats WHERE chat_id=%s LIMIT 1",
                 (chat_id,),
             )
             row = cur.fetchone()
@@ -709,9 +775,9 @@ class SupabaseWriter:
         cur = conn.cursor()
         try:
             cur.execute(
-                """
+                f"""
                 SELECT chat_id, chat_title, chat_username, chat_type
-                FROM rick_messages_tasks.telegram_chats
+                FROM {self.schema}.telegram_chats
                 WHERE chat_title ILIKE %s OR chat_username ILIKE %s
                 LIMIT %s
                 """,
@@ -769,8 +835,8 @@ class SupabaseWriter:
         cur = conn.cursor()
         try:
             cur.execute(
-                """
-                INSERT INTO rick_messages_tasks.telegram_ingest_runs
+                f"""
+                INSERT INTO {self.schema}.telegram_ingest_runs
                 (run_id, telegram_user_id, mode, started_at, status)
                 VALUES (%s,%s,%s,%s,'running')
                 """,
@@ -818,8 +884,8 @@ class SupabaseWriter:
         cur = conn.cursor()
         try:
             cur.execute(
-                """
-                UPDATE rick_messages_tasks.telegram_ingest_runs
+                f"""
+                UPDATE {self.schema}.telegram_ingest_runs
                 SET finished_at=%s, processed_chats=%s, inserted_messages=%s,
                     last_error=%s, status=%s
                 WHERE run_id=%s

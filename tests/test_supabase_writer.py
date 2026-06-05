@@ -473,3 +473,49 @@ class TestMainLamaIntegration:
             content = f.read()
         assert 'LABA_MODE' in content
         assert 'register_event_handlers' in content
+
+
+class TestSchemaPerProfile:
+    """Schema-per-profile resolution (RCA 2026-06-05, owner directive).
+
+    Каждый Telegram-аккаунт пишет в СВОЮ Supabase-схему — данные не смешиваются.
+    """
+
+    def _resolver(self):
+        from heroes_platform.heroes_telegram_mcp.supabase_writer import _schema_for_profile
+        return _schema_for_profile
+
+    def test_ikrasinsky_keeps_legacy_schema(self, monkeypatch):
+        monkeypatch.delenv("SUPABASE_TELEGRAM_SCHEMA", raising=False)
+        assert self._resolver()("ikrasinsky") == "rick_messages_tasks"
+
+    def test_ik_aliases_to_legacy_schema(self, monkeypatch):
+        monkeypatch.delenv("SUPABASE_TELEGRAM_SCHEMA", raising=False)
+        assert self._resolver()("ik") == "rick_messages_tasks"
+        assert self._resolver()("ilyakrasinsky") == "rick_messages_tasks"
+
+    def test_lisa_gets_own_schema(self, monkeypatch):
+        monkeypatch.delenv("SUPABASE_TELEGRAM_SCHEMA", raising=False)
+        assert self._resolver()("lisa") == "tg_lisa"
+
+    def test_new_client_uses_tg_slug_convention(self, monkeypatch):
+        monkeypatch.delenv("SUPABASE_TELEGRAM_SCHEMA", raising=False)
+        assert self._resolver()("smokeway-co") == "tg_smokeway_co"
+        assert self._resolver()("Typhoon Coffee") == "tg_typhoon_coffee"
+        assert self._resolver()("vipavenue.ru") == "tg_vipavenue_ru"
+
+    def test_env_override_wins(self, monkeypatch):
+        monkeypatch.setenv("SUPABASE_TELEGRAM_SCHEMA", "public")
+        assert self._resolver()("lisa") == "public"
+        assert self._resolver()("ikrasinsky") == "public"
+
+    def test_empty_profile_raises_fail_fast(self, monkeypatch):
+        monkeypatch.delenv("SUPABASE_TELEGRAM_SCHEMA", raising=False)
+        with pytest.raises(ValueError):
+            self._resolver()("   ")
+
+    def test_writer_instance_schema_wired(self, monkeypatch):
+        monkeypatch.delenv("SUPABASE_TELEGRAM_SCHEMA", raising=False)
+        from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
+        assert SupabaseWriter(telegram_user_id="lisa").schema == "tg_lisa"
+        assert SupabaseWriter(telegram_user_id="ikrasinsky").schema == "rick_messages_tasks"
