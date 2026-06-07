@@ -69,6 +69,37 @@ Agent НЕ имеет доступа: `git@git.rick.ai` (publickey denied), Bitw
 `just secrets decrypt production` → `just release` → deploy via
 `DOCKER_HOST=ssh://jupyter.production.node.rickai.net:30022` → `just secrets clear production`.
 
+### ⚠️ B1 — telegram-mcp НЕ в дефолтной deploy-цепочке (RCA 2026-06-01, корень 38-дневного простоя)
+
+**Голый `just release` / `just deploy` НЕ деплоит telegram-mcp.** В `[projects]/laba/justfile`
+`base_compose_file` = `compose.yml:compose.common:compose.<env>.yml` — telegram-mcp compose-файлов
+там нет, а `.drone.yml` pipeline `deploy production` гоняет именно эти дефолтные `just`-таргеты →
+деплоится только `app`. Поэтому контейнер telegram-mcp никогда не поднимался автоматически
+(supabase замёрз на 2026-04-24).
+
+**Фикс — один из двух (применяет команда, нужен git.rick.ai push):**
+
+(a) Добавить telegram-mcp в дефолтную цепочку: вписать `:docker/compose.telegram-mcp.yml` в
+`base_compose_file` (станет always-on вместе с `app`).
+
+(b) Отдельные таргеты (рекомендуется — изоляция) в `[projects]/laba/justfile`:
+
+```makefile
+_tg_compose := "compose.yml:docker/compose.common.yml:docker/compose.telegram-mcp.yml:docker/compose.telegram-mcp." + env + ".yml:docker/compose." + env + ".yml"
+
+release-telegram-mcp:
+    COMPOSE_FILE={{_tg_compose}} DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose build telegram-mcp
+    COMPOSE_FILE={{_tg_compose}} docker compose push telegram-mcp
+
+deploy-telegram-mcp:
+    COMPOSE_FILE={{_tg_compose}} docker compose pull telegram-mcp
+    COMPOSE_FILE={{_tg_compose}} docker compose up --detach telegram-mcp
+```
++ шаг в `.drone.yml` pipeline `deploy production`: `just env=production release-telegram-mcp` и `deploy-telegram-mcp`.
+
+После деплоя — проверить непрерывность через supabase:
+`SELECT max(message_ts), count(*) FROM rick_messages_tasks.telegram_messages_raw WHERE created_at > now() - interval '10 min'` (должен расти) и `SELECT mode, status FROM ...telegram_ingest_runs ORDER BY id DESC LIMIT 1` (live `listener_boot`/`heartbeat`, не `failed`).
+
 ## Post-deploy / непрерывный контроль
 
 **Канал не должен умирать молча.** Поставить `session_health_monitor.py` в cron/CI:
