@@ -168,4 +168,7 @@ def register_event_handlers(client: Any) -> None:
         schedule_backfill_tasks(loop, client, _get_writer())
     except Exception as exc:
         logger.error("Failed to schedule backfill tasks: %s", exc, exc_info=True)
-        print(f"⚠️ Backfill NOT scheduled (live ingestion still on): {exc}", file=__import__("sys").stderr)
+        print(
+            f"⚠️ Backfill NOT scheduled (live ingestion still on): {exc}",
+            file=__import__("sys").stderr,
+        )

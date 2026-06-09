@@ -96,7 +96,12 @@ class FakeClient:
 
 class FakeWriter:
     def __init__(
-        self, cursors=None, telegram_user_id="ikrasinsky", catch_up_returns=None, fail_chats=None, flood_chats=None
+        self,
+        cursors=None,
+        telegram_user_id="ikrasinsky",
+        catch_up_returns=None,
+        fail_chats=None,
+        flood_chats=None,
     ):
         self.telegram_user_id = telegram_user_id
         self.batch_size = 2
@@ -164,7 +169,9 @@ def test_chat_type_unknown_when_no_entity():
 def test_chat_with_cursor_calls_catch_up():
     writer = FakeWriter(cursors={100: {"last_seen_message_id": 50}}, catch_up_returns={100: 7})
     client = FakeClient([])
-    written, truncated = run(backfill_one_chat(client, writer, 100, "private", per_chat_limit=5000, seed_limit=500))
+    written, truncated = run(
+        backfill_one_chat(client, writer, 100, "private", per_chat_limit=5000, seed_limit=500)
+    )
     assert written == 7
     assert truncated is False
     assert writer.catch_up_calls == [(100, "private", 5000)]
@@ -176,7 +183,9 @@ def test_chat_without_cursor_seeds_incremental_cursor():
     msgs = [FakeMsg(1), FakeMsg(2), FakeMsg(3)]
     writer = FakeWriter(cursors={})
     client = FakeClient([], messages_by_chat={200: msgs})
-    written, truncated = run(backfill_one_chat(client, writer, 200, "private", per_chat_limit=5000, seed_limit=500))
+    written, truncated = run(
+        backfill_one_chat(client, writer, 200, "private", per_chat_limit=5000, seed_limit=500)
+    )
     assert written == 3
     assert truncated is False
     # batch_size=2 → курсор двигается ИНКРЕМЕНТАЛЬНО: после батча [1,2]→cursor=2, после [3]→cursor=3
@@ -204,7 +213,10 @@ def test_seed_no_truncation_when_under_limit():
 
 # ── T3: N chats → all scanned, aggregate ──────────────────────────────────────
 def test_all_chats_aggregate():
-    dialogs = [FakeDialog(1, FakeEntity(first_name="A")), FakeDialog(2, FakeEntity(broadcast=True))]
+    dialogs = [
+        FakeDialog(1, FakeEntity(first_name="A")),
+        FakeDialog(2, FakeEntity(broadcast=True)),
+    ]
     writer = FakeWriter(
         cursors={1: {"last_seen_message_id": 10}, 2: {"last_seen_message_id": 20}},
         catch_up_returns={1: 3, 2: 5},
@@ -220,7 +232,11 @@ def test_all_chats_aggregate():
 def test_per_chat_failure_isolated():
     dialogs = [FakeDialog(i, FakeEntity(first_name=str(i))) for i in (1, 2, 3)]
     writer = FakeWriter(
-        cursors={1: {"last_seen_message_id": 1}, 2: {"last_seen_message_id": 1}, 3: {"last_seen_message_id": 1}},
+        cursors={
+            1: {"last_seen_message_id": 1},
+            2: {"last_seen_message_id": 1},
+            3: {"last_seen_message_id": 1},
+        },
         catch_up_returns={1: 2, 3: 4},
         fail_chats={2},
     )
@@ -253,7 +269,10 @@ def test_dialog_limit():
 
 
 def test_skip_empty_chat_id():
-    dialogs = [FakeDialog(0, FakeEntity(first_name="A")), FakeDialog(5, FakeEntity(first_name="B"))]
+    dialogs = [
+        FakeDialog(0, FakeEntity(first_name="A")),
+        FakeDialog(5, FakeEntity(first_name="B")),
+    ]
     writer = FakeWriter(cursors={5: {"last_seen_message_id": 1}}, catch_up_returns={5: 3})
     res = run(backfill_all_chats(FakeClient(dialogs), writer))
     assert res.chats_scanned == 1  # chat_id=0 пропущен

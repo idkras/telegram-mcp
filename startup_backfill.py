@@ -234,7 +234,9 @@ async def backfill_one_chat(
     async def _do() -> tuple[int, bool]:
         cursor = await writer.get_chat_cursor(chat_id)
         if cursor and cursor.get("last_seen_message_id"):
-            written = await writer.catch_up_recent(client, chat_id, chat_type, limit=per_chat_limit)
+            written = await writer.catch_up_recent(
+                client, chat_id, chat_type, limit=per_chat_limit
+            )
             return written, False
         return await _seed_recent(client, writer, chat_id, chat_type, limit=seed_limit)
 
