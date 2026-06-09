@@ -181,7 +181,11 @@ class SupabaseWriter:
         self._postgres_url = postgres_url or _get_postgres_url()
         # Direct Postgres (Keychain SUPABASE_DB_URL / supabase_rick_db_url) may be unreachable from some
         # networks while HTTPS REST to supabase.rick.ai works — force REST upserts for chat registry.
-        if os.getenv("SUPABASE_TELEGRAM_USE_REST_ONLY", "").strip().lower() in ("1", "true", "yes"):
+        if os.getenv("SUPABASE_TELEGRAM_USE_REST_ONLY", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
             self._postgres_url = None
 
     @property
@@ -621,13 +625,26 @@ class SupabaseWriter:
         try:
             self._ensure_chat_state_pg(conn, chat_id)
             if last_seen_message_id is not None:
+                # GREATEST → курсор монотонен: race между live NewMessage handler и
+                # backfill не может откатить курсор назад (blind overwrite давал
+                # регрессию качества данных). last_seen_ts двигаем только когда id вырос.
                 cur.execute(
                     f"""
                     UPDATE {self.schema}.telegram_chat_state
-                    SET last_seen_message_id=%s, last_seen_ts=%s
+                    SET last_seen_message_id=GREATEST(COALESCE(last_seen_message_id, 0), %s),
+                        last_seen_ts=CASE
+                            WHEN %s > COALESCE(last_seen_message_id, 0) THEN %s
+                            ELSE last_seen_ts
+                        END
                     WHERE telegram_user_id=%s AND chat_id=%s
                     """,
-                    (last_seen_message_id, now, self.telegram_user_id, chat_id),
+                    (
+                        last_seen_message_id,
+                        last_seen_message_id,
+                        now,
+                        self.telegram_user_id,
+                        chat_id,
+                    ),
                 )
             if last_backfill_message_id is not None:
                 cur.execute(
@@ -746,7 +763,9 @@ class SupabaseWriter:
             )
             if response.data:
                 return response.data[0]
-            legacy_response = self._table(TABLE_CHATS).select("*").eq("chat_id", cid).limit(1).execute()
+            legacy_response = (
+                self._table(TABLE_CHATS).select("*").eq("chat_id", cid).limit(1).execute()
+            )
             if legacy_response.data:
                 return legacy_response.data[0]
             return None
@@ -1104,7 +1123,10 @@ def _evaluate_runtime_health(
     transport_message: str,
 ) -> tuple[bool, str]:
     if listener_event_at is None:
-        return False, f"Telegram LABA runtime unhealthy: no listener heartbeat found; {transport_message}"
+        return (
+            False,
+            f"Telegram LABA runtime unhealthy: no listener heartbeat found; {transport_message}",
+        )
 
     now = datetime.now(tz=timezone.utc)
     listener_age = now - listener_event_at
