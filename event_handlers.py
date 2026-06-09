@@ -153,3 +153,19 @@ def register_event_handlers(client: Any) -> None:
 
     loop.create_task(_record_runtime_event("listener_boot"))
     loop.create_task(_heartbeat_loop())
+
+    # Backfill: догнать сообщения, пропущенные пока сервис был down / сессия мертва
+    # (startup gap-recovery) + периодически (дрейф live-handler). Фоновые таски —
+    # live-ingestion выше НЕ блокируется. Универсально по writer.telegram_user_id.
+    # Первый backfill стартует на свежем connect: для чатов с курсором catch_up
+    # догонит полностью; новые чаты засеются последними N (см. startup_backfill
+    # Non-goals). ImportError/любой сбой здесь логируется как ERROR (не warning) —
+    # тихая поломка backfill = §Always-green main observable signal (владелец узнал
+    # бы только из отсутствия данных).
+    try:
+        from heroes_platform.heroes_telegram_mcp.startup_backfill import schedule_backfill_tasks
+
+        schedule_backfill_tasks(loop, client, _get_writer())
+    except Exception as exc:
+        logger.error("Failed to schedule backfill tasks: %s", exc, exc_info=True)
+        print(f"⚠️ Backfill NOT scheduled (live ingestion still on): {exc}", file=__import__("sys").stderr)

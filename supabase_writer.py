@@ -621,13 +621,20 @@ class SupabaseWriter:
         try:
             self._ensure_chat_state_pg(conn, chat_id)
             if last_seen_message_id is not None:
+                # GREATEST → курсор монотонен: race между live NewMessage handler и
+                # backfill не может откатить курсор назад (blind overwrite давал
+                # регрессию качества данных). last_seen_ts двигаем только когда id вырос.
                 cur.execute(
                     f"""
                     UPDATE {self.schema}.telegram_chat_state
-                    SET last_seen_message_id=%s, last_seen_ts=%s
+                    SET last_seen_message_id=GREATEST(COALESCE(last_seen_message_id, 0), %s),
+                        last_seen_ts=CASE
+                            WHEN %s > COALESCE(last_seen_message_id, 0) THEN %s
+                            ELSE last_seen_ts
+                        END
                     WHERE telegram_user_id=%s AND chat_id=%s
                     """,
-                    (last_seen_message_id, now, self.telegram_user_id, chat_id),
+                    (last_seen_message_id, last_seen_message_id, now, self.telegram_user_id, chat_id),
                 )
             if last_backfill_message_id is not None:
                 cur.execute(
