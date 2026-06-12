@@ -27,6 +27,7 @@ Exit:
 Override:
     TG_SESSION_REUSE_ACK="<reason ≥12 chars>"  — намеренный reuse (не рекоменд.)
 """
+
 from __future__ import annotations
 
 import argparse
@@ -44,9 +45,7 @@ _SESSION_KEY_RE = re.compile(r".*_tg_session$|^telegram_session$")
 # человек правит .env.laba руками → `export X=...` / `X=... # laba` иначе не матчились
 # → guard молча отключался. StringSession = base64url, `#` в значение не входит,
 # поэтому отрезание trailing ` #...` безопасно.
-_ENV_SESSION_RE = re.compile(
-    r"^\s*(?:export\s+)?TELEGRAM_SESSION_STRING\s*=\s*(.+?)\s*$"
-)
+_ENV_SESSION_RE = re.compile(r"^\s*(?:export\s+)?TELEGRAM_SESSION_STRING\s*=\s*(.+?)\s*$")
 
 
 def _normalize(value: str) -> str:
@@ -91,7 +90,9 @@ def enumerate_keychain_sessions() -> dict[str, str] | None:
     try:
         dump = subprocess.run(
             ["security", "dump-keychain"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return None  # couldn't enumerate — INCONCLUSIVE, not "0 sessions"
@@ -111,7 +112,9 @@ def enumerate_keychain_sessions() -> dict[str, str] | None:
         try:
             val = subprocess.run(
                 ["security", "find-generic-password", "-s", name, "-w"],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True,
+                text=True,
+                timeout=15,
             ).stdout.strip()
         except (OSError, subprocess.SubprocessError):
             continue
@@ -199,7 +202,8 @@ def main() -> int:
         default=str(Path(__file__).resolve().parent.parent / ".env.laba"),
     )
     parser.add_argument(
-        "--strict", action="store_true",
+        "--strict",
+        action="store_true",
         help=f"INCONCLUSIVE → exit 2 (также через env {STRICT_ENV}=1)",
     )
     args = parser.parse_args()

@@ -23,6 +23,7 @@ Prerequisites:
   - SUPABASE_API_KEY or supabase_rick_api_key in Keychain
   - Telegram credentials (TELEGRAM_API_ID, TELEGRAM_API_HASH, SESSION_STRING)
 """
+
 from __future__ import annotations
 
 import argparse

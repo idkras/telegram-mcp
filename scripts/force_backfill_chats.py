@@ -8,6 +8,7 @@ startup_backfill — без ожидания периодика.
 
 Универсально: --chat-id повторяется, --seed-limit задаётся, --profile любой.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -37,9 +38,7 @@ from heroes_platform.heroes_telegram_mcp.supabase_writer import (  # noqa: E402
 from telethon import TelegramClient  # noqa: E402
 from telethon.sessions import StringSession  # noqa: E402
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -91,9 +90,7 @@ async def main() -> int:
     )
     args = parser.parse_args()
 
-    profile = (
-        args.profile or os.getenv("TELEGRAM_USER", "ikrasinsky")
-    ).strip().lower()
+    profile = (args.profile or os.getenv("TELEGRAM_USER", "ikrasinsky")).strip().lower()
     if profile in ("ik", "ilyakrasinsky"):
         profile = "ikrasinsky"
     os.environ["TELEGRAM_USER"] = profile
@@ -136,7 +133,10 @@ async def main() -> int:
         chat_type = await _detect_chat_type(client, chat_id)
         logger.info(
             "→ chat_id=%s type=%s — seed_limit=%s per_chat_limit=%s",
-            chat_id, chat_type, args.seed_limit, args.per_chat_limit,
+            chat_id,
+            chat_type,
+            args.seed_limit,
+            args.per_chat_limit,
         )
         try:
             written, truncated = await backfill_one_chat(
@@ -151,7 +151,8 @@ async def main() -> int:
             successes += 1
             logger.info(
                 "  ✓ written=%d truncated=%s (cursor will reflect max id)",
-                written, truncated,
+                written,
+                truncated,
             )
         except Exception as exc:
             logger.error("  ✗ failed for chat %s: %s", chat_id, exc)
@@ -160,7 +161,9 @@ async def main() -> int:
     await client.disconnect()
     logger.info(
         "Done. successes=%d failures=%d total_messages_written=%d",
-        successes, failures, total_written,
+        successes,
+        failures,
+        total_written,
     )
     return 0 if failures == 0 else 2
 

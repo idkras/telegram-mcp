@@ -22,6 +22,7 @@ Stage-7 architectural fix (B1, RCA 2026-06-12):
     launchd теперь только периодически запускает catch_up_recent — отдельного
     deep-backfill plist больше нет.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -70,7 +71,9 @@ async def main() -> int:
     parser.add_argument("--profile", default=None, help="Telegram profile: ikrasinsky or lisa")
     parser.add_argument("--keyword", default=None, help="Optional chat title filter")
     parser.add_argument("--limit-chats", type=int, default=None, help="Max chats to process")
-    parser.add_argument("--limit-messages", type=int, default=1000, help="Max recent messages/chat")
+    parser.add_argument(
+        "--limit-messages", type=int, default=1000, help="Max recent messages/chat"
+    )
     parser.add_argument("--max-dialogs", type=int, default=2000, help="Dialogs to scan")
     parser.add_argument(
         "--deep-backfill-budget",
@@ -149,7 +152,9 @@ async def main() -> int:
         chat_type = _chat_type_to_supabase(chat.get("type", "unknown"))
         title = chat.get("title", "") or ""
         username = chat.get("username")
-        await writer.upsert_chat(chat_id, chat_type=chat_type, chat_title=title, chat_username=username)
+        await writer.upsert_chat(
+            chat_id, chat_type=chat_type, chat_title=title, chat_username=username
+        )
         written = await writer.catch_up_recent(
             client,
             chat_id=chat_id,
@@ -158,7 +163,9 @@ async def main() -> int:
         )
         total_written += written
         if processed % 50 == 0:
-            logger.info("Progress: %d chats processed, %d messages written", processed, total_written)
+            logger.info(
+                "Progress: %d chats processed, %d messages written", processed, total_written
+            )
         await asyncio.sleep(0.05)
 
     # ── Stage-7 B1: bounded backward deep-backfill в ТОМ ЖЕ соединении ──

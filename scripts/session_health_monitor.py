@@ -33,6 +33,7 @@ Exit:
     только печать в stderr + exit code (cron сам решит что делать). Канал alert —
     OWNER DECISION, монитор его не зашивает.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -116,7 +117,8 @@ def main() -> int:
     summary = (
         f"🔴 Telegram session(s) DEAD ({len(dead)}): "
         + ", ".join(f"{r['profile']}={r['code']}" for r in dead)
-        + "\n\n" + table
+        + "\n\n"
+        + table
         + "\n\nRe-auth требуется (SMS на телефон аккаунта). См. update_lisa_session.py "
         "/ update_lisa_session_via_qr.py. Дай каждому endpoint СВОЮ session string."
     )
@@ -124,9 +126,7 @@ def main() -> int:
 
     if args.alert_cmd:
         try:
-            subprocess.run(
-                args.alert_cmd, shell=True, input=summary, text=True, timeout=30
-            )
+            subprocess.run(args.alert_cmd, shell=True, input=summary, text=True, timeout=30)
         except (OSError, subprocess.SubprocessError) as exc:
             print(f"session-health-monitor: alert-cmd failed: {exc}", file=sys.stderr)
     return 1

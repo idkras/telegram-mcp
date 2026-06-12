@@ -29,6 +29,7 @@ Prerequisites:
   - If direct Postgres (Keychain supabase_rick_db_url) times out but REST works: set
     SUPABASE_TELEGRAM_USE_REST_ONLY=1 so chat upserts use Supabase REST instead of psycopg2.
 """
+
 from __future__ import annotations
 
 import argparse
