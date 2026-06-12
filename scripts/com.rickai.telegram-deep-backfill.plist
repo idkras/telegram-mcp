@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent for hourly system-wide deep Telegram backfill.
+
+  JTBD: Когда нужна непрерывная гарантия что Supabase содержит ПОЛНУЮ историю
+  чатов всех профилей (а не только seed N + новее last_seen курсора), я хочу
+  чтобы deep_backfill крутился сам, не реже раз в час, и не пересекался с
+  5-минутным periodic catch_up (двойной iter_messages = умножение rate-limit).
+
+  Универсальность: per-profile copy этого plist (Label содержит {profile}).
+  Один и тот же агент работает для любого нового TELEGRAM_USER alias — менять
+  только `Label`, `TELEGRAM_USER`, `StandardOutPath`, `StandardErrorPath`.
+
+  ВНИМАНИЕ: это **template**. Перед загрузкой через launchctl нужно:
+
+    1. Скопировать в ~/Library/LaunchAgents/com.rickai.telegram-deep-backfill-{profile}.plist
+    2. Заменить ВСЕ {{PROFILE}} → конкретный alias (ikrasinsky / lisa / ...).
+    3. Заменить {{WORKSPACE_ROOT}} → абсолютный путь к workspace.
+    4. Установить:
+         launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.rickai.telegram-deep-backfill-{profile}.plist
+         launchctl kickstart -p gui/$UID/com.rickai.telegram-deep-backfill-{profile}
+
+  flock защита: только один экземпляр deep_backfill для одного профиля одновременно
+  (даже если launchd триггерит overlapping interval из-за clock skew).
+
+  StartInterval = 3600 (раз в час). Можно поменять на StartCalendarInterval для
+  cron-style расписания. Дефолт «раз в час» подобран так чтобы:
+    - не пересекаться с 5-мин periodic catch_up (BACKFILL_PERIODIC_INTERVAL_SECONDS=300),
+    - дать каждому из 425+ чатов lisa шанс на ровный rate-limit-friendly proceeding,
+    - не упереться в дневной FloodWait лимит при per-chat-limit=2000.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.rickai.telegram-deep-backfill-{{PROFILE}}</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>exec /usr/bin/flock -n /tmp/telegram-deep-backfill-{{PROFILE}}.lock \
+            {{WORKSPACE_ROOT}}/.venv/bin/python \
+            {{WORKSPACE_ROOT}}/heroes_platform/heroes_telegram_mcp/scripts/deep_backfill_history.py \
+            --profile {{PROFILE}} \
+            --budget 10000 \
+            --per-chat 2000 \
+            --select-limit 500</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>TELEGRAM_USER</key>
+    <string>{{PROFILE}}</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>{{WORKSPACE_ROOT}}</string>
+
+  <key>StartInterval</key>
+  <integer>3600</integer>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/telegram-deep-backfill-{{PROFILE}}.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/tmp/telegram-deep-backfill-{{PROFILE}}.err.log</string>
+
+  <key>ThrottleInterval</key>
+  <integer>3600</integer>
+
+  <key>Nice</key>
+  <integer>10</integer>
+</dict>
+</plist>
