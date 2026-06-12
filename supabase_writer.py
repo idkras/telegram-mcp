@@ -647,13 +647,37 @@ class SupabaseWriter:
                     ),
                 )
             if last_backfill_message_id is not None:
+                # LEAST → backward-floor монотонно идёт ВНИЗ (зеркало GREATEST
+                # для last_seen). Blind overwrite давал race: параллельный проход
+                # с устаревшим (более высоким) min_id мог поднять floor вверх
+                # → следующий проход начал бы с более высокого id, пропустив
+                # уже обработанный участок. COALESCE покрывает первый проход
+                # когда floor ещё NULL — берём явный new (LEAST(NULL, X)=NULL
+                # в PG, поэтому COALESCE-вокруг столбца обязателен).
+                # last_backfill_ts двигаем только когда floor реально опустился.
                 cur.execute(
                     f"""
                     UPDATE {self.schema}.telegram_chat_state
-                    SET last_backfill_message_id=%s, last_backfill_ts=%s
+                    SET last_backfill_message_id=LEAST(
+                            COALESCE(last_backfill_message_id, %s),
+                            %s
+                        ),
+                        last_backfill_ts=CASE
+                            WHEN %s < COALESCE(last_backfill_message_id, %s)
+                                OR last_backfill_message_id IS NULL THEN %s
+                            ELSE last_backfill_ts
+                        END
                     WHERE telegram_user_id=%s AND chat_id=%s
                     """,
-                    (last_backfill_message_id, now, self.telegram_user_id, chat_id),
+                    (
+                        last_backfill_message_id,
+                        last_backfill_message_id,
+                        last_backfill_message_id,
+                        last_backfill_message_id,
+                        now,
+                        self.telegram_user_id,
+                        chat_id,
+                    ),
                 )
             if backfill_completed is not None:
                 cur.execute(
