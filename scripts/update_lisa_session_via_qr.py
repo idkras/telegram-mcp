@@ -76,8 +76,12 @@ async def main() -> None:
         print(f"INFO: Raw tg:// login URL saved to: {url_path}")
         print(f"INFO: Raw tg:// login URL: {qr_login.url}")
         print(f"INFO: QR token expires at: {qr_login.expires.isoformat()}")
-        print("INFO: Open Telegram on Lisa's already logged-in device, go to Settings -> Devices -> Link Desktop Device, and scan this QR.")
-        print("INFO: Alternative: open the raw tg:// URL on a device where Lisa Telegram is already logged in.")
+        print(
+            "INFO: Open Telegram on Lisa's already logged-in device, go to Settings -> Devices -> Link Desktop Device, and scan this QR."
+        )
+        print(
+            "INFO: Alternative: open the raw tg:// URL on a device where Lisa Telegram is already logged in."
+        )
 
         try:
             import subprocess
@@ -136,11 +140,19 @@ async def main() -> None:
         session_string = client.session.save()
         saved = credentials_manager.store_credential(names["session"], session_string, "keychain")
         if not saved:
-            raise RuntimeError("QR login succeeded, but failed to save lisa_tg_session to Keychain")
+            raise RuntimeError(
+                "QR login succeeded, but failed to save lisa_tg_session to Keychain"
+            )
 
         username = f"@{user.username}" if getattr(user, "username", None) else "no-username"
-        full_name = " ".join(part for part in [getattr(user, "first_name", None), getattr(user, "last_name", None)] if part)
-        print(f"SUCCESS: Lisa session updated for {username} ({full_name or 'no-name'}, id={user.id})")
+        full_name = " ".join(
+            part
+            for part in [getattr(user, "first_name", None), getattr(user, "last_name", None)]
+            if part
+        )
+        print(
+            f"SUCCESS: Lisa session updated for {username} ({full_name or 'no-name'}, id={user.id})"
+        )
         print(f"INFO: Saved new session to Keychain key {names['session']}")
     finally:
         await client.disconnect()

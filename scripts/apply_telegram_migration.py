@@ -13,6 +13,7 @@ DDL без ручного SQL Editor. Подключение и выполнен
 
 Секреты: только в env/Keychain, не коммитить в репо.
 """
+
 from __future__ import annotations
 
 import os

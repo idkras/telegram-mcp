@@ -26,6 +26,7 @@ JTBD: Когда нужна УВЕРЕННОСТЬ что все Telegram-чат
 Универсально для любого нового профиля: запустил → получил число.
 Не модифицирует данные. Только read.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -53,9 +54,7 @@ from heroes_platform.shared.credentials_wrapper import (  # noqa: E402
 from telethon import TelegramClient  # noqa: E402
 from telethon.sessions import StringSession  # noqa: E402
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -78,9 +77,7 @@ def _registered_chats(profile: str) -> set[str]:
     conn = _supabase_conn()
     try:
         cur = conn.cursor()
-        cur.execute(
-            "SELECT chat_id FROM rick_messages_tasks.telegram_chats"
-        )
+        cur.execute("SELECT chat_id FROM rick_messages_tasks.telegram_chats")
         return {str(r[0]) for r in cur.fetchall()}
     finally:
         conn.close()
@@ -160,8 +157,7 @@ async def main() -> int:
     parser.add_argument(
         "--profile",
         default=None,
-        help="Telegram profile alias (TELEGRAM_USER env). "
-        "Default: from env or 'ikrasinsky'.",
+        help="Telegram profile alias (TELEGRAM_USER env). " "Default: from env or 'ikrasinsky'.",
     )
     parser.add_argument(
         "--list-missing",
@@ -182,10 +178,7 @@ async def main() -> int:
     )
     args = parser.parse_args()
 
-    profile = (
-        args.profile
-        or os.getenv("TELEGRAM_USER", "ikrasinsky")
-    ).strip().lower()
+    profile = (args.profile or os.getenv("TELEGRAM_USER", "ikrasinsky")).strip().lower()
     if profile in ("ik", "ilyakrasinsky"):
         profile = "ikrasinsky"
     os.environ["TELEGRAM_USER"] = profile
@@ -200,7 +193,9 @@ async def main() -> int:
     if not api_hash or api_id == 0 or not session_str:
         logger.error(
             "Invalid Telegram credentials: api_id=%s api_hash_len=%s session_len=%s",
-            api_id, len(api_hash), len(session_str)
+            api_id,
+            len(api_hash),
+            len(session_str),
         )
         return 1
 
@@ -222,9 +217,7 @@ async def main() -> int:
     missing_from_bookkeeping = dialog_ids - registered
     registered_but_zero = registered - with_msgs
     dialogs_with_zero = dialog_ids - with_msgs
-    coverage_pct = (
-        (len(with_msgs & dialog_ids) / len(dialog_ids) * 100) if dialog_ids else 0.0
-    )
+    coverage_pct = (len(with_msgs & dialog_ids) / len(dialog_ids) * 100) if dialog_ids else 0.0
 
     # --- print summary ---
     print()
@@ -243,7 +236,9 @@ async def main() -> int:
 
     # --- list missing dialogs (видим в Telegram, не зарегистрированы) ---
     if args.list_missing > 0 and missing_from_bookkeeping:
-        print(f"### Missing from bookkeeping (видим в Telegram но не в telegram_chats), top {args.list_missing}:")
+        print(
+            f"### Missing from bookkeeping (видим в Telegram но не в telegram_chats), top {args.list_missing}:"
+        )
         print()
         print(f"| chat_id | title | type |")
         print(f"|---|---|---|")
@@ -291,8 +286,7 @@ async def main() -> int:
             "missing_from_bookkeeping": sorted(missing_from_bookkeeping),
             "registered_but_zero": sorted(registered_but_zero),
             "dialogs_sample": [
-                {"chat_id": cid, **info}
-                for cid, info in list(dialogs.items())[:200]
+                {"chat_id": cid, **info} for cid, info in list(dialogs.items())[:200]
             ],
         }
         Path(args.save_report).write_text(json.dumps(report, indent=2, default=str))

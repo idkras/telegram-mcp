@@ -53,6 +53,7 @@ Keychain → запустил с `--profile <alias>` → история догн
 если на той же машине detected persistent endpoint (защита от случайного
 параллельного hourly bootstrap, который сломал бы прод).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -84,9 +85,7 @@ from heroes_platform.heroes_telegram_mcp.supabase_writer import (  # noqa: E402
 from telethon import TelegramClient  # noqa: E402
 from telethon.sessions import StringSession  # noqa: E402
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -167,11 +166,8 @@ async def main() -> int:
 
     # --- list-only path (без Telegram-логина) ---
     if args.list_only:
-        chats = await _select_chats_for_deep_backfill(
-            writer, limit=args.select_limit
-        )
-        print(f"\n## Deep backfill candidates · profile={profile} · "
-              f"top {args.select_limit}\n")
+        chats = await _select_chats_for_deep_backfill(writer, limit=args.select_limit)
+        print(f"\n## Deep backfill candidates · profile={profile} · " f"top {args.select_limit}\n")
         print("| chat_id | chat_type |")
         print("|---|---|")
         for cid, ctype in chats:
@@ -189,7 +185,9 @@ async def main() -> int:
     if not api_hash or api_id == 0 or not session_str:
         logger.error(
             "Invalid Telegram credentials: api_id=%s api_hash_len=%s session_len=%s",
-            api_id, len(api_hash), len(session_str)
+            api_id,
+            len(api_hash),
+            len(session_str),
         )
         return 1
 

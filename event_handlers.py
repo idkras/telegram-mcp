@@ -17,6 +17,7 @@ Usage:
     if os.getenv("LABA_MODE") == "true":
         register_event_handlers(client)
 """
+
 from __future__ import annotations
 
 import logging

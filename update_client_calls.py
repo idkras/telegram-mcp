@@ -2,6 +2,7 @@
 """
 Script to update all client calls to use ensure_client_initialized()
 """
+
 import re
 
 

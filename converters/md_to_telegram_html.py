@@ -23,10 +23,23 @@ from __future__ import annotations
 import html as _html
 import re
 
-
 # Telegram HTML whitelist (Bot API documentation):
 # https://core.telegram.org/bots/api#html-style
-ALLOWED_TAGS = {"b", "strong", "i", "em", "u", "ins", "s", "strike", "del", "code", "pre", "a", "tg-spoiler"}
+ALLOWED_TAGS = {
+    "b",
+    "strong",
+    "i",
+    "em",
+    "u",
+    "ins",
+    "s",
+    "strike",
+    "del",
+    "code",
+    "pre",
+    "a",
+    "tg-spoiler",
+}
 
 
 def _escape_html(text: str) -> str:
@@ -160,8 +173,14 @@ def validate_telegram_html(html: str) -> dict[str, object]:
 if __name__ == "__main__":
     # Smoke tests на реальных кейсах из management chat
     cases = [
-        ("**Вы уже глубже большинства понимаете** 🍿", "<b>Вы уже глубже большинства понимаете</b> 🍿"),
-        ("[Sales Heroes](https://heroes.camp/x) • 28 марта", '<a href="https://heroes.camp/x">Sales Heroes</a> • 28 марта'),
+        (
+            "**Вы уже глубже большинства понимаете** 🍿",
+            "<b>Вы уже глубже большинства понимаете</b> 🍿",
+        ),
+        (
+            "[Sales Heroes](https://heroes.camp/x) • 28 марта",
+            '<a href="https://heroes.camp/x">Sales Heroes</a> • 28 марта',
+        ),
         ("`code` and **bold**", "<code>code</code> and <b>bold</b>"),
         ("# Заголовок\n**bold**", "<b>Заголовок</b>\n<b>bold</b>"),
         ("- пункт 1\n- пункт 2", "• пункт 1\n• пункт 2"),

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Tests for validate_session_per_endpoint (RCA 2026-05-28 AuthKeyDuplicated)."""
+
 from __future__ import annotations
 
 import importlib.util
@@ -21,7 +22,7 @@ def _write_env(session: str | None) -> str:
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write("TELEGRAM_API_ID=12345\n")
         if session is not None:
-            fh.write(f'TELEGRAM_SESSION_STRING={session}\n')
+            fh.write(f"TELEGRAM_SESSION_STRING={session}\n")
     return p
 
 
@@ -70,7 +71,9 @@ def _run(env_path: str, env_extra: dict | None = None) -> tuple[int, str]:
         env.update(env_extra)
     proc = subprocess.run(
         [sys.executable, str(HOOK), "--env-path", env_path],
-        capture_output=True, text=True, env=env,
+        capture_output=True,
+        text=True,
+        env=env,
     )
     return proc.returncode, proc.stderr
 

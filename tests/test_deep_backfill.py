@@ -176,11 +176,7 @@ def test_backward_walk_first_pass_from_last_seen():
     msgs = [FakeMsg(i) for i in range(1, 250)]  # ids 1..249
     writer = FakeWriter(cursors={777: {"last_seen_message_id": 200}})
     client = FakeClient(messages_by_chat={777: msgs})
-    res = run(
-        deep_backfill_one_chat(
-            client, writer, 777, "private", per_run_limit=50
-        )
-    )
+    res = run(deep_backfill_one_chat(client, writer, 777, "private", per_run_limit=50))
     # Должны записать 50 сообщений от floor=200 вниз (ids 150..199 descending)
     assert res.written == 50
     assert res.floor_before == 200
@@ -208,11 +204,7 @@ def test_resumable_second_pass_extends_floor_down():
         }
     )
     client = FakeClient(messages_by_chat={777: msgs})
-    res = run(
-        deep_backfill_one_chat(
-            client, writer, 777, "private", per_run_limit=50
-        )
-    )
+    res = run(deep_backfill_one_chat(client, writer, 777, "private", per_run_limit=50))
     # Floor=150 → берём msgs id<150, limit=50 → ids 100..149 → min=100
     assert res.written == 50
     assert res.floor_before == 150
@@ -236,19 +228,14 @@ def test_short_batch_does_not_mark_completed():
     msgs = [FakeMsg(i) for i in range(1, 31)]
     writer = FakeWriter(cursors={888: {"last_backfill_message_id": 20}})
     client = FakeClient(messages_by_chat={888: msgs})
-    res = run(
-        deep_backfill_one_chat(
-            client, writer, 888, "private", per_run_limit=50
-        )
-    )
+    res = run(deep_backfill_one_chat(client, writer, 888, "private", per_run_limit=50))
     assert res.written == 19
     assert res.min_id_seen == 1
     # KEY ASSERTION: short batch ≠ completed.
     assert res.completed is False
     # Cursor продвинут до floor=1 (incremental cursor, H1), но НЕ completed.
     assert any(
-        cu[0] == 888 and cu[2] == 1 and cu[3] is None
-        for cu in writer.cursor_updates
+        cu[0] == 888 and cu[2] == 1 and cu[3] is None for cu in writer.cursor_updates
     ), f"expected incremental cursor update to floor=1, got {writer.cursor_updates}"
     # Подтверждение completed произойдёт на следующем проходе через seen==0
     # (см. test_short_batch_completed_on_next_pass_through_seen_zero).
@@ -263,11 +250,7 @@ def test_short_batch_completed_on_next_pass_through_seen_zero():
     # Имитируем состояние после первого short-batch прохода
     writer = FakeWriter(cursors={888: {"last_backfill_message_id": 1}})
     client = FakeClient(messages_by_chat={888: msgs})
-    res = run(
-        deep_backfill_one_chat(
-            client, writer, 888, "private", per_run_limit=50
-        )
-    )
+    res = run(deep_backfill_one_chat(client, writer, 888, "private", per_run_limit=50))
     assert res.written == 0
     assert res.completed is True
     # cursor_update с backfill_completed=True
@@ -290,9 +273,7 @@ def test_empty_chat_marks_completed():
     """Чат без сообщений (либо floor=last_seen уже на дне) → 0 seen → terminal."""
     writer = FakeWriter(cursors={1001: {"last_seen_message_id": 5}})
     client = FakeClient(messages_by_chat={1001: []})
-    res = run(
-        deep_backfill_one_chat(client, writer, 1001, "private", per_run_limit=50)
-    )
+    res = run(deep_backfill_one_chat(client, writer, 1001, "private", per_run_limit=50))
     assert res.written == 0
     assert res.completed is True
     # cursor_update только с backfill_completed=True (без min_id)
@@ -316,9 +297,7 @@ def test_floodwait_retry_succeeds():
         flood_chats={2002: 1},  # 1 flood → retry success
     )
     client = FakeClient(messages_by_chat={2002: msgs})
-    res = run(
-        deep_backfill_one_chat(client, writer, 2002, "private", per_run_limit=50)
-    )
+    res = run(deep_backfill_one_chat(client, writer, 2002, "private", per_run_limit=50))
     # Counter не задвоен (C2 fix): только 10, а не 20.
     assert res.written == 10
     # H2 fix: 10 < 50 limit, но > 0 → НЕ completed.
@@ -334,9 +313,7 @@ def test_write_failure_is_isolated():
         fail_chats={3003},
     )
     client = FakeClient(messages_by_chat={3003: msgs})
-    res = run(
-        deep_backfill_one_chat(client, writer, 3003, "private", per_run_limit=50)
-    )
+    res = run(deep_backfill_one_chat(client, writer, 3003, "private", per_run_limit=50))
     assert res.error is not None
     assert "simulated" in res.error
     assert res.completed is False
@@ -414,9 +391,7 @@ def test_budget_exhaustion_stops_orchestrator():
     assert res.chats_processed == 1  # только chat 10
     assert res.messages_written == 49
     # Маркер — budget_exhausted
-    assert any(
-        ev[0] == "deep_backfill_budget_exhausted" for ev in writer.runtime_events
-    )
+    assert any(ev[0] == "deep_backfill_budget_exhausted" for ev in writer.runtime_events)
 
 
 # ── T10: DEAD session — session_dead маркер, не зелёный ──────────────────────
@@ -437,9 +412,7 @@ def test_dead_session_no_false_green():
     )
     assert res.session_dead is True
     assert res.messages_written == 0
-    assert any(
-        ev[0] == "deep_backfill_session_dead" for ev in writer.runtime_events
-    )
+    assert any(ev[0] == "deep_backfill_session_dead" for ev in writer.runtime_events)
 
 
 # ── T11: no chats to backfill — no-op маркер ─────────────────────────────────
@@ -493,9 +466,7 @@ def test_message_empty_id_zero_excluded_from_min_id():
     msgs = [FakeMsg(0), FakeMsg(5), FakeMsg(10)]  # MessageEmpty + 2 real
     writer = FakeWriter(cursors={4040: {"last_backfill_message_id": 100}})
     client = FakeClient(messages_by_chat={4040: msgs})
-    res = run(
-        deep_backfill_one_chat(client, writer, 4040, "private", per_run_limit=50)
-    )
+    res = run(deep_backfill_one_chat(client, writer, 4040, "private", per_run_limit=50))
     # written = 3 (Supabase ON CONFLICT может схлопнуть, но writer.batch — 3).
     assert res.written == 3
     # min_id_seen = 5, не 0 (id=0 отфильтрован).
@@ -514,15 +485,11 @@ def test_incremental_cursor_update_per_batch():
     writer = FakeWriter(cursors={5050: {"last_backfill_message_id": 100}})
     writer.batch_size = 2  # маленький batch → много flush'ей
     client = FakeClient(messages_by_chat={5050: msgs})
-    res = run(
-        deep_backfill_one_chat(client, writer, 5050, "private", per_run_limit=50)
-    )
+    res = run(deep_backfill_one_chat(client, writer, 5050, "private", per_run_limit=50))
     assert res.written == 6
     # Должно быть >= 3 cursor update'ов (по одному на каждый flush).
     # Старый код давал ровно 1 update в конце.
-    floor_updates = [
-        cu for cu in writer.cursor_updates if cu[2] is not None
-    ]
+    floor_updates = [cu for cu in writer.cursor_updates if cu[2] is not None]
     assert len(floor_updates) >= 3, (
         f"expected ≥3 incremental cursor updates, got {len(floor_updates)}: "
         f"{writer.cursor_updates}"
@@ -557,19 +524,14 @@ def test_floodwait_after_successful_flush_does_not_double_count():
             self.written_batches.append((int(chat_id), n))
             return n
 
-    writer = FloodAfterFirstBatchWriter(
-        cursors={6060: {"last_backfill_message_id": 100}}
-    )
+    writer = FloodAfterFirstBatchWriter(cursors={6060: {"last_backfill_message_id": 100}})
     writer.batch_size = 2
     msgs = [FakeMsg(i) for i in range(1, 6)]  # ids 1..5
     client = FakeClient(messages_by_chat={6060: msgs})
-    res = run(
-        deep_backfill_one_chat(client, writer, 6060, "private", per_run_limit=50)
-    )
+    res = run(deep_backfill_one_chat(client, writer, 6060, "private", per_run_limit=50))
     # Counter — только из второго прохода (5 msgs), не 2 + 5 = 7.
     assert res.written == 5, (
-        f"expected 5 (retry-only count), got {res.written} — "
-        f"counter inflation regression"
+        f"expected 5 (retry-only count), got {res.written} — " f"counter inflation regression"
     )
     assert res.error is None
 
@@ -579,6 +541,7 @@ def test_stalled_marker_when_no_writes_but_chats_active():
     """Stage-7 detect-of-detector: если non-completed чаты обрабатываются и НЕ
     пишут НИЧЕГО → это stall, не green. Маркер `deep_backfill_stalled`."""
     writer = FakeWriter(cursors={7070: {"last_backfill_message_id": 100}})
+
     # Пустой чат, НО backfill_completed НЕ выставлен в cursor → non-completed.
     # iter_messages вернёт 0 → seen=0 → в данном случае completed=True.
     # Для имитации stall нам нужен чат который non-completed И не пишет.
@@ -616,6 +579,7 @@ def test_stalled_marker_when_no_writes_but_chats_active():
             )
 
     writer2 = NoCompleteWriter(cursors={7070: {"last_backfill_message_id": 5}})
+
     # Floor=5, msgs только id=10,20 — iter с offset_id=5 даст пусто.
     # seen=0 → in code completed=True пытается выставиться → NoCompleteWriter
     # игнорирует → chat_result.completed остаётся False (потому что мы не
@@ -649,9 +613,7 @@ def test_stalled_marker_when_no_writes_but_chats_active():
         f"expected stalled=True (non-completed chat writes 0), "
         f"got stalled={res.stalled}, marker={res.marker_mode()}"
     )
-    assert any(
-        ev[0] == "deep_backfill_stalled" for ev in writer3.runtime_events
-    )
+    assert any(ev[0] == "deep_backfill_stalled" for ev in writer3.runtime_events)
 
 
 # ── T17: stalled НЕ выставляется когда все processed chats уже completed ────
@@ -820,7 +782,5 @@ def test_update_cursor_pg_uses_least_for_backfill_floor():
     backfill_sql = [s for s, _p in captured if "last_backfill_message_id" in s]
     assert backfill_sql, "no UPDATE for last_backfill_message_id captured"
     sql = backfill_sql[0]
-    assert "LEAST" in sql, (
-        f"expected LEAST in UPDATE for backfill floor monotonicity, got: {sql}"
-    )
+    assert "LEAST" in sql, f"expected LEAST in UPDATE for backfill floor monotonicity, got: {sql}"
     assert "COALESCE" in sql
