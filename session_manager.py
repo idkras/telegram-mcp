@@ -222,7 +222,9 @@ async def create_telegram_session(
             phone_result = credentials_manager.get_credential(credential_names.get("phone") or "")
             if phone_result.success and phone_result.value:
                 phone = phone_result.value
-                print(f"INFO: Loaded phone from credential {credential_names.get('phone')}: {_mask_phone(phone)}")
+                print(
+                    f"INFO: Loaded phone from credential {credential_names.get('phone')}: {_mask_phone(phone)}"
+                )
             else:
                 phone = input("Enter your phone number (with country code, e.g., +1234567890): ")
 
@@ -236,7 +238,9 @@ async def create_telegram_session(
             print(f"INFO: Next delivery type: {next_type}")
         if timeout is not None:
             print(f"INFO: Telegram timeout before another resend: {timeout}s")
-            print("INFO: If no fresh message arrives, Telegram may still expect the previous unexpired code.")
+            print(
+                "INFO: If no fresh message arrives, Telegram may still expect the previous unexpired code."
+            )
 
         if not code:
             code = input("Enter the verification code: ")

@@ -15,6 +15,7 @@ Architecture:
 Credentials: Mac Keychain via credentials_manager (supabase_rick_api_key)
 Migration: 20250110000001_telegram_tdlib_tables.sql (must be applied first)
 """
+
 from __future__ import annotations
 
 import json

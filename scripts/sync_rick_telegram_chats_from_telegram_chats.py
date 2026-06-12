@@ -16,6 +16,7 @@ Prerequisites:
   - SUPABASE_DB_URL или SUPABASE_RICK_DB_URL (или Keychain supabase_rick_db_url)
   - Миграции 20250215000000 и 20250216000001 применены
 """
+
 from __future__ import annotations
 
 import sys

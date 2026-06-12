@@ -3383,7 +3383,10 @@ if __name__ == "__main__":
                 try:
                     me = await client.get_me()  # type: ignore
                     who = getattr(me, "username", None) or getattr(me, "id", "?")
-                    print(f"✅ LABA_MODE preflight: authorized as {who} — starting listener.", file=sys.stderr)
+                    print(
+                        f"✅ LABA_MODE preflight: authorized as {who} — starting listener.",
+                        file=sys.stderr,
+                    )
                 except Exception as me_err:
                     print(
                         f"❌ LABA_MODE preflight: get_me() failed ({me_err}). Refusing to start listener.",

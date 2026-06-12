@@ -10,6 +10,7 @@ Usage:
 
 Output: JSON array of {chat_id, chat_title, chat_username, chat_type}.
 """
+
 from __future__ import annotations
 
 import argparse

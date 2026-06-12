@@ -292,18 +292,14 @@ async def deep_backfill_one_chat(
             # Snapshot до записи: при partial failure внутри write_messages_batch
             # local accumulator уже обновится только после успешного await.
             valid_ids = [
-                int(getattr(m, "id", 0) or 0)
-                for m in batch
-                if int(getattr(m, "id", 0) or 0) > 0
+                int(getattr(m, "id", 0) or 0) for m in batch if int(getattr(m, "id", 0) or 0) > 0
             ]
             n = await writer.write_messages_batch(batch, cid_int, chat_type)
             pass_state["written"] += n
             if valid_ids:
                 batch_min = min(valid_ids)
                 prev = pass_state["min_id_seen"]
-                pass_state["min_id_seen"] = (
-                    batch_min if prev is None else min(prev, batch_min)
-                )
+                pass_state["min_id_seen"] = batch_min if prev is None else min(prev, batch_min)
                 # H1 incremental cursor: продвигаем floor после КАЖДОГО batch.
                 # LEAST в _update_chat_cursor_pg гарантирует монотонность даже
                 # при race с параллельным проходом. last_backfill_ts обновляется
@@ -572,9 +568,7 @@ async def deep_backfill_all_chats(
         if explicit_chats is not None:
             chats = list(explicit_chats)
         else:
-            chats = await _select_chats_for_deep_backfill(
-                writer, limit=chat_select_limit
-            )
+            chats = await _select_chats_for_deep_backfill(writer, limit=chat_select_limit)
 
         if not chats:
             logger.info(

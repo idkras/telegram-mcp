@@ -2,6 +2,7 @@
 """
 Simple test script to verify MCP server functionality
 """
+
 import json
 import subprocess
 import sys

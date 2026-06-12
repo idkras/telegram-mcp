@@ -12,6 +12,7 @@ Usage:
 
 Output: JSON with chats[] and optionally messages_by_chat{}.
 """
+
 from __future__ import annotations
 
 import argparse
