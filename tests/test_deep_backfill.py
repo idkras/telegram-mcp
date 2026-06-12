@@ -167,7 +167,12 @@ def test_flood_wait_seconds_ignores_other_errors():
 
 # ── T1: backward-walk first pass от last_seen floor ──────────────────────────
 def test_backward_walk_first_pass_from_last_seen():
-    """Чат с last_seen=200, last_backfill=NULL. Должны взять msgs id<200."""
+    """Чат с last_seen=200, last_backfill=NULL. Должны взять msgs id<200.
+
+    После H1 incremental cursor: update_chat_cursor зовётся ПОСЛЕ КАЖДОГО
+    flush. С batch_size=100 и limit=50 будет ровно один flush в конце цикла
+    (collected 50 < batch_size 100) — поэтому ровно один cursor update без
+    backfill_completed (seen=50 > 0)."""
     msgs = [FakeMsg(i) for i in range(1, 250)]  # ids 1..249
     writer = FakeWriter(cursors={777: {"last_seen_message_id": 200}})
     client = FakeClient(messages_by_chat={777: msgs})
@@ -182,9 +187,12 @@ def test_backward_walk_first_pass_from_last_seen():
     # min_id_seen = id 150
     assert res.min_id_seen == 150
     assert res.floor_after == 150
-    assert res.completed is False  # история длиннее, ещё есть что догнать
-    # Cursor update: floor moved to 150, not completed
-    assert (777, None, 150, False) in writer.cursor_updates
+    # H2 fix: completed остаётся False — short batch != confirmed bottom.
+    # Подтверждение через seen==0 на следующем проходе.
+    assert res.completed is False
+    # Cursor update: floor moved to 150 incrementally (no backfill_completed
+    # since seen > 0).
+    assert (777, None, 150, None) in writer.cursor_updates
 
 
 # ── T2: resumable — второй проход продвигает floor ниже ───────────────────────
@@ -213,10 +221,18 @@ def test_resumable_second_pass_extends_floor_down():
     assert res.completed is False
 
 
-# ── T3: backfill_completed=TRUE когда история исчерпана ──────────────────────
-def test_backfill_completed_when_history_exhausted():
-    """Чат с msgs 1..30, floor=20, limit=50. Получим 19 сообщений (1..19) <
-    limit → terminal."""
+# ── T3: short batch НЕ метит completed (RCA H2 false-completion fix) ──────
+def test_short_batch_does_not_mark_completed():
+    """RCA H2: старый код метил completed=TRUE когда `seen < per_run_limit`.
+    Это false-positive: transient short batch (rate-limit / pagination blip)
+    ложно ставил completed=TRUE навсегда → следующий проход пропускал чат
+    → undetected потеря истории.
+
+    Новая семантика: completed=TRUE ТОЛЬКО когда seen==0 (реально дно).
+    `seen < limit && seen > 0` оставляем для следующего прогона.
+
+    Чат с msgs 1..30, floor=20, limit=50. Получим 19 сообщений → completed
+    остаётся FALSE (следующий проход подтвердит через seen==0)."""
     msgs = [FakeMsg(i) for i in range(1, 31)]
     writer = FakeWriter(cursors={888: {"last_backfill_message_id": 20}})
     client = FakeClient(messages_by_chat={888: msgs})
@@ -227,8 +243,35 @@ def test_backfill_completed_when_history_exhausted():
     )
     assert res.written == 19
     assert res.min_id_seen == 1
+    # KEY ASSERTION: short batch ≠ completed.
+    assert res.completed is False
+    # Cursor продвинут до floor=1 (incremental cursor, H1), но НЕ completed.
+    assert any(
+        cu[0] == 888 and cu[2] == 1 and cu[3] is None
+        for cu in writer.cursor_updates
+    ), f"expected incremental cursor update to floor=1, got {writer.cursor_updates}"
+    # Подтверждение completed произойдёт на следующем проходе через seen==0
+    # (см. test_short_batch_completed_on_next_pass_through_seen_zero).
+
+
+# ── T3b: confirm completed на следующем проходе через seen==0 ─────────────
+def test_short_batch_completed_on_next_pass_through_seen_zero():
+    """После T3 floor=1, msgs все на или выше floor=1 → следующий проход
+    с floor=1 видит 0 сообщений старше floor=1 (только id=1 не пройдёт,
+    т.к. iter возвращает id<floor=1 → пусто) → terminal через seen==0."""
+    msgs = [FakeMsg(i) for i in range(1, 31)]
+    # Имитируем состояние после первого short-batch прохода
+    writer = FakeWriter(cursors={888: {"last_backfill_message_id": 1}})
+    client = FakeClient(messages_by_chat={888: msgs})
+    res = run(
+        deep_backfill_one_chat(
+            client, writer, 888, "private", per_run_limit=50
+        )
+    )
+    assert res.written == 0
     assert res.completed is True
-    assert (888, None, 1, True) in writer.cursor_updates
+    # cursor_update с backfill_completed=True
+    assert (888, None, None, True) in writer.cursor_updates
 
 
 # ── T4: уже completed — пропускаем без работы ─────────────────────────────────
@@ -258,7 +301,15 @@ def test_empty_chat_marks_completed():
 
 # ── T6: FloodWait → sleep + retry проходит ────────────────────────────────────
 def test_floodwait_retry_succeeds():
-    """Одна FloodWait → retry → проход успешен."""
+    """Одна FloodWait → retry → проход успешен.
+
+    После C2 fix (counter inflation): result.written берётся из ВТОРОГО
+    прохода (pass_state["written"] обнуляется в начале _do() ). Первый проход
+    дописал 10 (на flush первой batch), но потом упал FloodWait → retry
+    обнулил pass_state и дописал заново те же 10 (idempotent ON CONFLICT,
+    видимый счётчик — только 10, не 20).
+
+    После H2 fix: 10 seen > 0 и < 50 → completed остаётся False."""
     msgs = [FakeMsg(i) for i in range(1, 11)]
     writer = FakeWriter(
         cursors={2002: {"last_backfill_message_id": 100}},
@@ -268,9 +319,10 @@ def test_floodwait_retry_succeeds():
     res = run(
         deep_backfill_one_chat(client, writer, 2002, "private", per_run_limit=50)
     )
-    # 10 msgs < 50 limit → completed
+    # Counter не задвоен (C2 fix): только 10, а не 20.
     assert res.written == 10
-    assert res.completed is True
+    # H2 fix: 10 < 50 limit, но > 0 → НЕ completed.
+    assert res.completed is False
     assert res.error is None
 
 
@@ -292,6 +344,14 @@ def test_write_failure_is_isolated():
 
 # ── T8: оркестратор с explicit_chats — обходит DB selection ──────────────────
 def test_orchestrator_explicit_chats():
+    """После H2 fix completed выставляется только при seen==0.
+
+    Chat 1 floor=50, msgs 1..29 → 29 seen (< 100 limit) → NOT completed,
+    floor продвинут до 1.
+    Chat 2 floor=100, msgs 1..59 → 59 seen → NOT completed, floor до 1.
+    Chat 3 уже completed=True → skip без работы, completed=True.
+
+    Total completed = 1 (только chat 3, который уже был completed)."""
     writer = FakeWriter(
         cursors={
             1: {"last_seen_message_id": 50},
@@ -320,8 +380,8 @@ def test_orchestrator_explicit_chats():
         )
     )
     assert res.chats_processed == 3
-    # chat 3 уже completed → 0 written; 1 и 2 завершены
-    assert res.chats_completed == 3  # все терминальные
+    # chat 3 skip-completed; chats 1,2 short-batch → НЕ completed (H2 fix).
+    assert res.chats_completed == 1
     assert res.chats_failed == 0
     assert res.messages_written == 29 + 59  # ids 1..29 и 1..59
 
@@ -411,5 +471,356 @@ def test_marker_mode_session_dead_takes_priority():
     assert res2.marker_mode() == "deep_backfill_partial"
     res3 = DeepBackfillRunResult(budget_exhausted=True)
     assert res3.marker_mode() == "deep_backfill_budget_exhausted"
-    res4 = DeepBackfillRunResult()
-    assert res4.marker_mode() == "deep_backfill_ok"
+    res4 = DeepBackfillRunResult(stalled=True)
+    assert res4.marker_mode() == "deep_backfill_stalled"
+    res5 = DeepBackfillRunResult()
+    assert res5.marker_mode() == "deep_backfill_ok"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Stage-7 rework tests (B1/C1/C2/C3/H1/H2 + design priority + stalled detector)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+# ── T13: C3 — msg.id=0 (MessageEmpty) НЕ участвует в min_id_seen ─────────────
+def test_message_empty_id_zero_excluded_from_min_id():
+    """Telegram отдаёт MessageEmpty (id=0) для удалённых сообщений в pagination.
+    Раньше batch_min = min(0, real_min) = 0 → floor=0 → следующий проход
+    стартовал от newest и тратил FloodWait-бюджет на already-written.
+
+    Fix C3 (Stage-7): фильтруем msg.id > 0 ДО min(). batch_min должен быть
+    минимальным РЕАЛЬНЫМ id, не 0."""
+    msgs = [FakeMsg(0), FakeMsg(5), FakeMsg(10)]  # MessageEmpty + 2 real
+    writer = FakeWriter(cursors={4040: {"last_backfill_message_id": 100}})
+    client = FakeClient(messages_by_chat={4040: msgs})
+    res = run(
+        deep_backfill_one_chat(client, writer, 4040, "private", per_run_limit=50)
+    )
+    # written = 3 (Supabase ON CONFLICT может схлопнуть, но writer.batch — 3).
+    assert res.written == 3
+    # min_id_seen = 5, не 0 (id=0 отфильтрован).
+    assert res.min_id_seen == 5
+    assert res.floor_after == 5
+
+
+# ── T14: H1 — incremental cursor update после каждого batch ──────────────────
+def test_incremental_cursor_update_per_batch():
+    """RCA H1: если процесс убьют между write и cursor-update, floor должен
+    быть уже продвинут хотя бы до конца последнего успешно записанного batch.
+
+    Имитируем batch_size=2 и 6 сообщений → 3 flush'а → 3 cursor update'а.
+    Старый код делал ОДИН cursor update в конце цикла."""
+    msgs = [FakeMsg(i) for i in range(1, 7)]  # ids 1..6
+    writer = FakeWriter(cursors={5050: {"last_backfill_message_id": 100}})
+    writer.batch_size = 2  # маленький batch → много flush'ей
+    client = FakeClient(messages_by_chat={5050: msgs})
+    res = run(
+        deep_backfill_one_chat(client, writer, 5050, "private", per_run_limit=50)
+    )
+    assert res.written == 6
+    # Должно быть >= 3 cursor update'ов (по одному на каждый flush).
+    # Старый код давал ровно 1 update в конце.
+    floor_updates = [
+        cu for cu in writer.cursor_updates if cu[2] is not None
+    ]
+    assert len(floor_updates) >= 3, (
+        f"expected ≥3 incremental cursor updates, got {len(floor_updates)}: "
+        f"{writer.cursor_updates}"
+    )
+    # Финальный min_id = 1.
+    assert res.min_id_seen == 1
+
+
+# ── T15: C2 — FloodWait после успешного flush НЕ дублирует счётчик ──────────
+def test_floodwait_after_successful_flush_does_not_double_count():
+    """RCA C2: первый flush записал N, потом упал FloodWait, retry перезаписал
+    те же N (ON CONFLICT идемпотентно). Счётчик должен показать N, не 2N.
+
+    Имитация: batch_size=2, msgs 1..5, flood после ПЕРВОГО batch.
+    Первый flush пишет 2 (ids 4,5 от newest вниз) → flood → retry _do()
+    обнуляет pass_state → второй проход дописывает все 5."""
+
+    class FloodAfterFirstBatchWriter(FakeWriter):
+        """Падаем FloodWait на ВТОРОМ вызове write_messages_batch (после первого
+        успешного flush)."""
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._write_calls = 0
+
+        async def write_messages_batch(self, batch, chat_id, chat_type):
+            self._write_calls += 1
+            # На 2-м вызове в первом проходе — flood; ретрай (вызовы 3+) проходит.
+            if self._write_calls == 2:
+                raise FloodWait(0)
+            n = len(batch)
+            self.written_batches.append((int(chat_id), n))
+            return n
+
+    writer = FloodAfterFirstBatchWriter(
+        cursors={6060: {"last_backfill_message_id": 100}}
+    )
+    writer.batch_size = 2
+    msgs = [FakeMsg(i) for i in range(1, 6)]  # ids 1..5
+    client = FakeClient(messages_by_chat={6060: msgs})
+    res = run(
+        deep_backfill_one_chat(client, writer, 6060, "private", per_run_limit=50)
+    )
+    # Counter — только из второго прохода (5 msgs), не 2 + 5 = 7.
+    assert res.written == 5, (
+        f"expected 5 (retry-only count), got {res.written} — "
+        f"counter inflation regression"
+    )
+    assert res.error is None
+
+
+# ── T16: stalled marker когда non-completed чаты не пишут ничего ────────────
+def test_stalled_marker_when_no_writes_but_chats_active():
+    """Stage-7 detect-of-detector: если non-completed чаты обрабатываются и НЕ
+    пишут НИЧЕГО → это stall, не green. Маркер `deep_backfill_stalled`."""
+    writer = FakeWriter(cursors={7070: {"last_backfill_message_id": 100}})
+    # Пустой чат, НО backfill_completed НЕ выставлен в cursor → non-completed.
+    # iter_messages вернёт 0 → seen=0 → в данном случае completed=True.
+    # Для имитации stall нам нужен чат который non-completed И не пишет.
+    # Хитрее: сделаем чат с floor=10 и msgs только > 10 (значит iter с
+    # offset_id=10 даст 0). seen=0 → completed=True → НЕ stall.
+    # → stall случается когда iter возвращает 0 НО completed не выставляется.
+    # Для теста используем chat 3 (completed=True уже) + chat 4 (тоже completed).
+    # Но тогда non_completed_processed = 0 → НЕ stall. Правильно: нам нужен
+    # чат который non-completed но не пишет. Это возможно при FloodWait
+    # без retry success → result.error, но это тоже исключается через
+    # chats_failed > 0. Реалистично: chat с уже completed=False, floor=1,
+    # 1 msg id=1: seen=0 (filter id<floor=1 → пусто) → completed=True →
+    # non_completed_processed=0.
+    # Стабильный сценарий: используем пустой чат с floor=NULL и
+    # last_seen_message_id=NULL → floor=0 → iter с no offset_id → пусто →
+    # seen=0 → completed=True. Это не stall.
+    # Финально, чтобы получить stall — нужен fake client который возвращает
+    # 0 сообщений НО не updates cursor (mock-инъекция).
+    class NoCompleteWriter(FakeWriter):
+        """Игнорирует backfill_completed=True (имитация регрессии H2)."""
+
+        async def update_chat_cursor(
+            self,
+            chat_id,
+            last_seen_message_id=None,
+            last_backfill_message_id=None,
+            backfill_completed=None,
+        ):
+            # Сбрасываем completed обратно → имитация false-negative bug.
+            return await super().update_chat_cursor(
+                chat_id,
+                last_seen_message_id,
+                last_backfill_message_id,
+                backfill_completed=None,
+            )
+
+    writer2 = NoCompleteWriter(cursors={7070: {"last_backfill_message_id": 5}})
+    # Floor=5, msgs только id=10,20 — iter с offset_id=5 даст пусто.
+    # seen=0 → in code completed=True пытается выставиться → NoCompleteWriter
+    # игнорирует → chat_result.completed остаётся False (потому что мы не
+    # cursor flag читаем, а возврат функции — completed=True всё равно
+    # выставлен в `result.completed`).
+    # Поэтому используем другой путь: completed=True на verification level
+    # in DeepBackfillChatResult — игнорировать невозможно. Меняем подход:
+    # имитируем chat где iter возвращает что-то, но writer.write_batch вернёт 0
+    # (имитация all-already-written скенарий).
+    class ZeroWriteWriter(FakeWriter):
+        async def write_messages_batch(self, batch, chat_id, chat_type):
+            return 0  # ON CONFLICT — все уже записаны
+
+    writer3 = ZeroWriteWriter(cursors={7070: {"last_backfill_message_id": 100}})
+    msgs = [FakeMsg(i) for i in range(1, 6)]
+    client = FakeClient(messages_by_chat={7070: msgs})
+    res = run(
+        deep_backfill_all_chats(
+            client,
+            writer3,
+            total_budget=1000,
+            per_chat_limit=10,
+            explicit_chats=[("7070", "private")],
+        )
+    )
+    # 5 msgs < limit=10 → seen=5 > 0, но writer вернул 0 → messages_written=0.
+    # completed остаётся False (H2 fix), failed=0 → stalled=True.
+    assert res.messages_written == 0
+    assert res.chats_failed == 0
+    assert res.stalled is True, (
+        f"expected stalled=True (non-completed chat writes 0), "
+        f"got stalled={res.stalled}, marker={res.marker_mode()}"
+    )
+    assert any(
+        ev[0] == "deep_backfill_stalled" for ev in writer3.runtime_events
+    )
+
+
+# ── T17: stalled НЕ выставляется когда все processed chats уже completed ────
+def test_not_stalled_when_all_processed_already_completed():
+    """No-op случай: все чаты уже completed=True → 0 writes — это валидный
+    green, НЕ stall."""
+    writer = FakeWriter(cursors={1: {"backfill_completed": True}})
+    client = FakeClient(messages_by_chat={1: [FakeMsg(10)]})
+    res = run(
+        deep_backfill_all_chats(
+            client,
+            writer,
+            total_budget=1000,
+            per_chat_limit=10,
+            explicit_chats=[("1", "private")],
+        )
+    )
+    assert res.chats_processed == 1
+    assert res.messages_written == 0
+    assert res.stalled is False
+    assert res.marker_mode() == "deep_backfill_ok"
+
+
+# ── T18: priority_chat_ids передаётся в PG selection ────────────────────────
+def test_priority_chat_ids_loaded_from_env(monkeypatch):
+    """`DEEP_BACKFILL_PRIORITY_CHATS` env → set[str]. Универсально для CI/laba."""
+    from heroes_platform.heroes_telegram_mcp.deep_backfill import (
+        _load_priority_chat_ids,
+    )
+
+    monkeypatch.setenv(
+        "DEEP_BACKFILL_PRIORITY_CHATS",
+        "1001, 1002 ,1003",
+    )
+    monkeypatch.delenv("DEEP_BACKFILL_PRIORITY_FILE", raising=False)
+    ids = _load_priority_chat_ids()
+    assert ids == {"1001", "1002", "1003"}
+
+
+def test_priority_chat_ids_empty_when_no_env(monkeypatch):
+    monkeypatch.delenv("DEEP_BACKFILL_PRIORITY_CHATS", raising=False)
+    monkeypatch.delenv("DEEP_BACKFILL_PRIORITY_FILE", raising=False)
+    from heroes_platform.heroes_telegram_mcp.deep_backfill import (
+        _load_priority_chat_ids,
+    )
+
+    assert _load_priority_chat_ids() == set()
+
+
+def test_priority_chat_ids_from_file(monkeypatch, tmp_path):
+    """JSON-файл с приоритетными chat_id — генерируется отдельно из
+    advising-clients-registry.yaml; этот модуль — consumer."""
+    import json as _json
+    from heroes_platform.heroes_telegram_mcp.deep_backfill import (
+        _load_priority_chat_ids,
+    )
+
+    f = tmp_path / "priority.json"
+    f.write_text(_json.dumps([2001, "2002", {"chat_id": 2003}]))
+    monkeypatch.delenv("DEEP_BACKFILL_PRIORITY_CHATS", raising=False)
+    monkeypatch.setenv("DEEP_BACKFILL_PRIORITY_FILE", str(f))
+    ids = _load_priority_chat_ids()
+    assert ids == {"2001", "2002", "2003"}
+
+
+# ── T19: PG SELECT с priority_chat_ids — клиенты идут первыми ───────────────
+def test_pg_select_orders_priority_tier_first():
+    """SELECT с priority_chat_ids: клиентский chat_id попадает в tier=0,
+    остальные tier=1. ORDER BY priority_tier ASC → клиенты первые.
+
+    Используем fake conn/cursor чтобы протестировать SQL без реального PG."""
+    from heroes_platform.heroes_telegram_mcp.deep_backfill import (
+        _select_chats_for_deep_backfill_pg,
+    )
+
+    captured_sql: dict = {}
+
+    class FakeCursor:
+        def __init__(self):
+            self.description = None
+
+        def execute(self, sql, params):
+            captured_sql["sql"] = sql
+            captured_sql["params"] = params
+            # Имитируем 3 row: один клиент (id=100) + 2 обычных.
+            # Должны вернуться в порядке priority_tier=0 первым.
+            self._rows = [
+                ("100", "private"),
+                ("200", "supergroup"),
+                ("300", "channel"),
+            ]
+
+        def fetchall(self):
+            return self._rows
+
+        def close(self):
+            pass
+
+    class FakeConn:
+        def cursor(self):
+            return FakeCursor()
+
+    rows = _select_chats_for_deep_backfill_pg(
+        FakeConn(),
+        schema="rick_messages_tasks",
+        telegram_user_id="ikrasinsky",
+        limit=10,
+        priority_chat_ids={"100"},
+    )
+    # SQL содержит priority_tier и ORDER BY priority_tier ASC.
+    assert "priority_tier" in captured_sql["sql"]
+    assert "ORDER BY priority_tier ASC" in captured_sql["sql"]
+    # params[0] = priority_list — должна содержать "100".
+    assert "100" in captured_sql["params"][0]
+    # Возвращены rows (порядок задан SQL'ом, не Python).
+    assert len(rows) == 3
+
+
+# ── T20: C1 — supabase_writer last_backfill_message_id монотонно идёт вниз ──
+def test_update_cursor_pg_uses_least_for_backfill_floor():
+    """RCA C1: blind overwrite (старый SET last_backfill_message_id=%s)
+    позволял race поднять floor вверх. Новый код использует
+    LEAST(COALESCE(...), new) → монотонность вниз гарантирована.
+
+    Тестируем напрямую SQL через mock conn — без реального PG."""
+    from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
+
+    captured: list[tuple[str, tuple]] = []
+
+    class FakeCursor:
+        def execute(self, sql, params):
+            captured.append((sql, params))
+
+        def close(self):
+            pass
+
+    class FakeConn:
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+    # Создаём writer-like object с нужными атрибутами (минимум для _update_chat_cursor_pg).
+    class FakeWriter2:
+        schema = "tg_test"
+        telegram_user_id = "test_user"
+
+        def _ensure_chat_state_pg(self, conn, chat_id):
+            pass
+
+    # Bind method to FakeWriter2.
+    fw = FakeWriter2()
+    SupabaseWriter._update_chat_cursor_pg(
+        fw,
+        FakeConn(),
+        chat_id="100",
+        last_seen_message_id=None,
+        last_backfill_message_id=42,
+        backfill_completed=None,
+    )
+    # Должен быть один SQL UPDATE для last_backfill, содержащий LEAST.
+    backfill_sql = [s for s, _p in captured if "last_backfill_message_id" in s]
+    assert backfill_sql, "no UPDATE for last_backfill_message_id captured"
+    sql = backfill_sql[0]
+    assert "LEAST" in sql, (
+        f"expected LEAST in UPDATE for backfill floor monotonicity, got: {sql}"
+    )
+    assert "COALESCE" in sql

@@ -152,6 +152,13 @@ class DeepBackfillRunResult:
     messages_written: int = 0
     budget_exhausted: bool = False
     session_dead: bool = False
+    # Detect-of-detector (Stage-7 review): если несколько проходов подряд по
+    # активным (не completed) чатам не записали НИЧЕГО — это не «всё ок», это
+    # stall: либо все floors уже на дне, но completed=FALSE (false-negative
+    # H2 регрессия), либо Telegram отдаёт пустые батчи (rate-limit / silent
+    # API change). Маркер `*_stalled` отдельно — чтобы panel видела тренд
+    # «coverage не растёт», а не ложный green.
+    stalled: bool = False
     per_chat: list[DeepBackfillChatResult] = field(default_factory=list)
 
     def marker_mode(self, phase: str = "deep_backfill") -> str:
@@ -161,6 +168,8 @@ class DeepBackfillRunResult:
             return f"{phase}_partial"
         if self.budget_exhausted:
             return f"{phase}_budget_exhausted"
+        if self.stalled:
+            return f"{phase}_stalled"
         return f"{phase}_ok"
 
 
@@ -246,23 +255,66 @@ async def deep_backfill_one_chat(
     floor = _resolve_floor(cursor)
     result.floor_before = floor
 
+    # Локальный аккумулятор written для этого ВЫЗОВА deep_backfill_one_chat
+    # (snapshot перед FloodWait retry). RCA C2: если использовать `result.written`
+    # как «истинный» счётчик и инкрементить на каждый _flush(), FloodWait retry
+    # после нескольких успешных _flush() даст double-count (первый проход
+    # дописал N, retry дописал N+M идемпотентно через ON CONFLICT, но счётчик
+    # увидит 2*N+M). Локальный pass_written обнуляется в начале каждого _do(),
+    # и переносится в result.written ТОЛЬКО ОДИН раз — после успешного выхода
+    # из _do() (см. блок коммита после try).
+    pass_state: dict[str, Any] = {"written": 0, "min_id_seen": None, "seen": 0}
+
     async def _do() -> DeepBackfillChatResult:
         batch: list[Any] = []
-        seen = 0
-        min_id_seen: int | None = None
         batch_size = int(getattr(writer, "batch_size", 100) or 100)
+        # Reset per-pass counters at START — FloodWait retry получит чистый старт.
+        pass_state["written"] = 0
+        pass_state["min_id_seen"] = None
+        pass_state["seen"] = 0
 
         async def _flush() -> None:
-            nonlocal batch, min_id_seen
+            """Запись batch + продвижение cursor + reporter update.
+
+            RCA B1 / C3 / H1: ВСЁ что меняет видимое состояние — здесь, после
+            каждого batch, а не в конце цикла. Это даёт:
+              - reporter (result.min_id_seen / floor_after) видит прогресс
+                даже если процесс убьют между _flush() и концом цикла;
+              - cursor продвигается инкрементально → idempotent ON CONFLICT
+                защищает повторный проход с новым floor;
+              - filter msg.id > 0: MessageEmpty / id=0 не должны участвовать в
+                min(): иначе min=0 → floor=0 → следующий проход стартует от
+                newest и пишет уже виденные сообщения (no-op по ON CONFLICT,
+                но трата FloodWait-бюджета).
+            """
             if not batch:
                 return
+            # Snapshot до записи: при partial failure внутри write_messages_batch
+            # local accumulator уже обновится только после успешного await.
+            valid_ids = [
+                int(getattr(m, "id", 0) or 0)
+                for m in batch
+                if int(getattr(m, "id", 0) or 0) > 0
+            ]
             n = await writer.write_messages_batch(batch, cid_int, chat_type)
-            result.written += n
-            batch_min = min(int(getattr(m, "id", 0) or 0) for m in batch)
-            min_id_seen = (
-                batch_min if min_id_seen is None else min(min_id_seen, batch_min)
-            )
-            batch = []
+            pass_state["written"] += n
+            if valid_ids:
+                batch_min = min(valid_ids)
+                prev = pass_state["min_id_seen"]
+                pass_state["min_id_seen"] = (
+                    batch_min if prev is None else min(prev, batch_min)
+                )
+                # H1 incremental cursor: продвигаем floor после КАЖДОГО batch.
+                # LEAST в _update_chat_cursor_pg гарантирует монотонность даже
+                # при race с параллельным проходом. last_backfill_ts обновляется
+                # только когда floor реально опустился (зеркало GREATEST).
+                result.min_id_seen = pass_state["min_id_seen"]
+                result.floor_after = pass_state["min_id_seen"]
+                await writer.update_chat_cursor(
+                    cid_int,
+                    last_backfill_message_id=pass_state["min_id_seen"],
+                )
+            batch.clear()
 
         # offset_id=0 — особый случай: Telegram трактует как "от newest";
         # для непустого floor он трактует "СТАРШЕ floor" (id < floor),
@@ -276,25 +328,22 @@ async def deep_backfill_one_chat(
 
         async for msg in client.iter_messages(**iter_kwargs):
             batch.append(msg)
-            seen += 1
+            pass_state["seen"] += 1
             if len(batch) >= batch_size:
                 await _flush()
         await _flush()
 
-        if min_id_seen is not None and min_id_seen > 0:
-            result.min_id_seen = min_id_seen
-            result.floor_after = min_id_seen
-            # Терминал: получили меньше чем просили = упёрлись в начало чата.
-            # 0 сообщений = либо пустой чат, либо floor уже на самом дне.
-            is_completed = seen < per_run_limit
-            await writer.update_chat_cursor(
-                cid_int,
-                last_backfill_message_id=min_id_seen,
-                backfill_completed=is_completed,
-            )
-            result.completed = is_completed
-        elif seen == 0:
-            # 0 сообщений старше floor (или пустой чат) → терминал.
+        # ── Completion semantics (RCA H2) ────────────────────────────────────
+        # Терминал ТОЛЬКО когда `seen == 0` — это значит «реально дно: 0
+        # сообщений старше floor». Раньше использовали `seen < per_run_limit`
+        # — это false-positive: transient short batch (rate-limit / network
+        # blip / gap в Telegram pagination) ложно метил completed=TRUE
+        # навсегда; следующий проход видел backfill_completed=TRUE и
+        # пропускал чат — undetected потеря истории.
+        # При `seen < per_run_limit && seen > 0` НЕ ставим completed,
+        # оставляем для следующего прогона (idempotent, безопасно).
+        if pass_state["seen"] == 0:
+            # 0 сообщений старше floor → реально упёрлись в начало чата.
             await writer.update_chat_cursor(
                 cid_int,
                 backfill_completed=True,
@@ -303,8 +352,14 @@ async def deep_backfill_one_chat(
 
         return result
 
+    # ── Внешний try с FloodWait single-retry ─────────────────────────────────
+    # RCA C2: result.written НЕ инкрементится в _flush() — иначе retry после
+    # успешных _flush() задвоит счётчик. Здесь делаем единственный transfer
+    # pass_state["written"] → result.written после успешного завершения _do().
     try:
-        return await _do()
+        outcome = await _do()
+        result.written = pass_state["written"]
+        return outcome
     except Exception as exc:  # noqa: BLE001
         wait = _flood_wait_seconds(exc)
         if wait is not None and 0 <= wait <= flood_max:
@@ -315,50 +370,121 @@ async def deep_backfill_one_chat(
             )
             await asyncio.sleep(wait)
             try:
-                return await _do()
+                outcome = await _do()
+                # _do() при retry сделал reset pass_state["written"]=0 → берём
+                # значение второго прохода (ON CONFLICT защищает от дублей в БД,
+                # но видимый счётчик — только второго прохода).
+                result.written = pass_state["written"]
+                return outcome
             except Exception as retry_exc:  # noqa: BLE001
+                # Сохраняем то что успели записать в любом из проходов до сбоя.
+                result.written = pass_state["written"]
                 result.error = f"{type(retry_exc).__name__}: {retry_exc}"
                 return result
+        result.written = pass_state["written"]
         result.error = f"{type(exc).__name__}: {exc}"
         return result
 
 
 # ── select chats by priority (PG) ─────────────────────────────────────────────
+def _load_priority_chat_ids() -> set[str]:
+    """Клиентские chat_id с tier=0 (highest priority).
+
+    Источники (по убыванию):
+      1. env `DEEP_BACKFILL_PRIORITY_CHATS` — comma-separated chat_ids (для
+         тестов / быстрого override).
+      2. env `DEEP_BACKFILL_PRIORITY_FILE` — путь к JSON со списком id (на
+         laba монтируется из advising-clients-registry.yaml через отдельный
+         генератор; здесь — только consumer, не парсим YAML напрямую → нет
+         зависимости от структуры реестра в этом hot-path модуле).
+
+    Universal: новый клиент = строка в реестре → регенерация JSON → авто-tier
+    без правки этого файла. RCA design: «priority tier из списка клиентских
+    chat_id» (Stage-7 review).
+
+    Returns set[str]. Если ничего не найдено → пустое множество (FIFO
+    fallback в SQL — сохраняет старое поведение).
+    """
+    raw = os.getenv("DEEP_BACKFILL_PRIORITY_CHATS", "").strip()
+    out: set[str] = set()
+    if raw:
+        for token in raw.split(","):
+            token = token.strip()
+            if token:
+                out.add(token)
+    file_path = os.getenv("DEEP_BACKFILL_PRIORITY_FILE", "").strip()
+    if file_path:
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+
+            data = _json.loads(_Path(file_path).read_text())
+            # Поддерживаем [int, ...] и [{"chat_id": ...}, ...] — не навязываем
+            # одну форму потребителю.
+            for entry in data if isinstance(data, list) else []:
+                if isinstance(entry, (int, str)):
+                    out.add(str(entry))
+                elif isinstance(entry, dict) and "chat_id" in entry:
+                    out.add(str(entry["chat_id"]))
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "Deep backfill priority file unreadable (%s): %s — falling back to FIFO",
+                file_path,
+                exc,
+            )
+    return out
+
+
 def _select_chats_for_deep_backfill_pg(
     conn: Any,
     schema: str,
     telegram_user_id: str,
     *,
     limit: int,
+    priority_chat_ids: set[str] | None = None,
 ) -> list[tuple[str, str]]:
     """SELECT chats нуждающихся в deep backfill.
 
     Приоритет:
     1. backfill_completed = FALSE
     2. is_active = TRUE
-    3. ORDER BY last_backfill_ts ASC NULLS FIRST  ← никогда не запускавшиеся первыми
-    4. LIMIT N
+    3. ORDER BY priority_tier ASC (0=клиент, 1=прочие) ← клиентские чаты ПЕРВЫМИ
+    4. ORDER BY last_backfill_ts ASC NULLS FIRST  ← никогда не запускавшиеся
+       первыми внутри своего tier
+    5. LIMIT N
+
+    Design (Stage-7 review): RCA — old FIFO не различал клиентов от системных
+    чатов; долгий «холодный» проход догонял служебные диалоги, а клиентские
+    выпадали в хвост. Tier из списка priority_chat_ids (см. `_load_priority_chat_ids`).
 
     Возвращает [(chat_id, chat_type), ...]. chat_type подтягивается LEFT JOIN
     из `telegram_chats` (там есть `chat_type`); если отсутствует → 'unknown'.
     """
+    priority_chat_ids = priority_chat_ids or set()
     cur = conn.cursor()
     try:
+        # ARRAY[…]::text[] перечисляем как параметр, чтобы избежать SQL-инъекции
+        # (chat_id это BIGINT приходящий из реестра / env). Пустой массив =>
+        # tier всегда 1 для всех — поведение совпадает со старым FIFO.
+        priority_list = [str(x) for x in priority_chat_ids]
         cur.execute(
             f"""
             SELECT s.chat_id,
-                   COALESCE(c.chat_type, 'unknown') AS chat_type
+                   COALESCE(c.chat_type, 'unknown') AS chat_type,
+                   CASE WHEN s.chat_id = ANY(%s::text[]) THEN 0 ELSE 1 END
+                       AS priority_tier
             FROM {schema}.telegram_chat_state s
             LEFT JOIN {schema}.telegram_chats c
                    ON c.chat_id = s.chat_id
             WHERE s.telegram_user_id = %s
               AND s.backfill_completed = FALSE
               AND s.is_active = TRUE
-            ORDER BY s.last_backfill_ts ASC NULLS FIRST,
+            ORDER BY priority_tier ASC,
+                     s.last_backfill_ts ASC NULLS FIRST,
                      s.chat_id ASC
             LIMIT %s
             """,
-            (telegram_user_id, limit),
+            (priority_list, telegram_user_id, limit),
         )
         return [(str(r[0]), str(r[1] or "unknown")) for r in cur.fetchall()]
     finally:
@@ -373,6 +499,10 @@ async def _select_chats_for_deep_backfill(
     """Async-обёртка вокруг PG SELECT. Если postgres_url не доступен (REST-only
     режим в тестах), возвращает пустой список — caller обязан передать chat_ids
     явно через CLI --chat-id.
+
+    Priority chat_ids подтягиваются из env (см. `_load_priority_chat_ids`).
+    Пустой список priority → tier всегда 1 → поведение совпадает со старым
+    FIFO (backward-compat).
     """
     pg_url = getattr(writer, "_postgres_url", None)
     if not pg_url:
@@ -380,12 +510,14 @@ async def _select_chats_for_deep_backfill(
     pg_conn_factory = getattr(writer, "_pg_conn", None)
     if pg_conn_factory is None:
         return []
+    priority = _load_priority_chat_ids()
     with pg_conn_factory() as conn:
         return _select_chats_for_deep_backfill_pg(
             conn,
             schema=writer.schema,
             telegram_user_id=writer.telegram_user_id,
             limit=limit,
+            priority_chat_ids=priority,
         )
 
 
@@ -496,15 +628,34 @@ async def deep_backfill_all_chats(
                 result.chats_completed += 1
             result.per_chat.append(chat_result)
 
+        # Detect-of-detector: stall = обрабатывали чаты, но НИЧЕГО не записали
+        # И никто не failed И не было budget_exhausted. Это либо все floors
+        # реально на дне (H2 регрессия: completed не выставлен), либо API
+        # тихо отдаёт пустые батчи. В обоих случаях — НЕ молчаливо green.
+        # Не считаем stall если все processed чаты были уже completed (валидный
+        # no-op).
+        non_completed_processed = sum(
+            1 for c in result.per_chat if not c.completed and c.error is None
+        )
+        if (
+            result.chats_processed > 0
+            and result.messages_written == 0
+            and result.chats_failed == 0
+            and not result.budget_exhausted
+            and non_completed_processed > 0
+        ):
+            result.stalled = True
+
         logger.info(
             "Deep backfill (user=%s): processed=%d completed=%d failed=%d "
-            "written=%d budget_exhausted=%s",
+            "written=%d budget_exhausted=%s stalled=%s",
             getattr(writer, "telegram_user_id", "?"),
             result.chats_processed,
             result.chats_completed,
             result.chats_failed,
             result.messages_written,
             result.budget_exhausted,
+            result.stalled,
         )
         try:
             errs = [c.error for c in result.per_chat if c.error]

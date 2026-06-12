@@ -1,5 +1,21 @@
 #!/usr/bin/env python3
-"""Run system-wide deep backfill (backward-walk) of Telegram chats to Supabase.
+"""Manual one-shot deep backfill (backward-walk) of Telegram chats to Supabase.
+
+⚠️ ARCHITECTURAL CHANGE (Stage-7, RCA 2026-06-12, B1 fix):
+
+    Раньше этот скрипт запускался отдельным launchd-агентом (плодил отдельное
+    persistent TelegramClient соединение). Параллельно с Mac MCP listener /
+    laba listener / 5-мин catch-up — это давало §Telegram session-per-endpoint
+    нарушение → AuthKeyDuplicated убивал прод-сессию.
+
+    Новый канон: deep-backfill — это bounded backward-фаза ВНУТРИ существующего
+    catch-up cycle. См.
+        scripts/catch_up_recent_telegram_to_supabase.py --deep-backfill-budget=N
+    Один TelegramClient на cycle (start → forward → backward → disconnect).
+
+    Этот скрипт остаётся как **manual one-shot** для аварийных целевых прогонов
+    (например прицельный backfill большого клиентского чата под steering
+    владельца). НЕ запускать через launchd параллельно с listener.
 
 JTBD: Когда нужна уверенность что в Supabase лежит ВСЯ история каждого чата
 (а не только последние seed N сообщений или новее last_seen курсора), я хочу
@@ -7,7 +23,7 @@ JTBD: Когда нужна уверенность что в Supabase лежит
 
     1. Возьмёт активный профиль (любой; по умолчанию из TELEGRAM_USER).
     2. Сама выберет чаты которым нужен deep backfill
-       (backfill_completed=FALSE, ORDER BY last_backfill_ts ASC NULLS FIRST).
+       (priority_tier ASC, потом last_backfill_ts ASC NULLS FIRST).
     3. Для каждого пойдёт ВНИЗ от floor (last_backfill OR last_seen) до начала
        чата либо до total_budget.
     4. Resumable: следующий запуск продолжит с floor предыдущего.
@@ -17,7 +33,7 @@ JTBD: Когда нужна уверенность что в Supabase лежит
 Keychain → запустил с `--profile <alias>` → история догнаётся. Никаких правок
 кода / hardcodes / per-client веток.
 
-Использование:
+Использование (one-shot):
     # Все чаты профиля ikrasinsky, по 10k сообщений за прогон, 2k на чат:
     .venv/bin/python heroes_platform/heroes_telegram_mcp/scripts/deep_backfill_history.py \\
         --profile ikrasinsky --budget 10000 --per-chat 2000
@@ -29,7 +45,13 @@ Keychain → запустил с `--profile <alias>` → история догн
     # Сухой прогон — какие чаты были бы выбраны:
     .venv/bin/python ... --profile ikrasinsky --list-only --select-limit 50
 
-launchd-обёртка: см. heroes_platform/heroes_telegram_mcp/scripts/com.rickai.telegram-deep-backfill.plist
+    # Приоритетные клиентские чаты (env-driven, universal):
+    DEEP_BACKFILL_PRIORITY_CHATS=-1001234,567890 \\
+        .venv/bin/python ... --profile ikrasinsky --budget 5000
+
+⚠️ ПРЕДУПРЕЖДЕНИЕ при запуске: скрипт ловит running listener и предупреждает,
+если на той же машине detected persistent endpoint (защита от случайного
+параллельного hourly bootstrap, который сломал бы прод).
 """
 from __future__ import annotations
 

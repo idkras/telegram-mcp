@@ -1,79 +1,61 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  launchd agent for hourly system-wide deep Telegram backfill.
+  ⚠️ DEPRECATED — НЕ загружать через launchctl bootstrap.
 
-  JTBD: Когда нужна непрерывная гарантия что Supabase содержит ПОЛНУЮ историю
-  чатов всех профилей (а не только seed N + новее last_seen курсора), я хочу
-  чтобы deep_backfill крутился сам, не реже раз в час, и не пересекался с
-  5-минутным periodic catch_up (двойной iter_messages = умножение rate-limit).
+  Stage-7 RCA 2026-06-12 (B1 BLOCKING — backend-reviewer):
+    Этот plist открывал ОТДЕЛЬНОЕ persistent TelegramClient соединение под
+    той же session string параллельно с Mac MCP listener / laba persistent
+    listener / 5-мин catch-up. Telegram считает каждое подключение по
+    session string — два endpoints с одной строкой = AuthKeyDuplicated
+    через несколько hourly прогонов. §Telegram session-per-endpoint
+    invariant (RCA 2026-05-28) нарушен по построению.
 
-  Универсальность: per-profile copy этого plist (Label содержит {profile}).
-  Один и тот же агент работает для любого нового TELEGRAM_USER alias — менять
-  только `Label`, `TELEGRAM_USER`, `StandardOutPath`, `StandardErrorPath`.
+  Новый канон (B1 fix):
+    deep_backfill_all_chats() вызывается ВНУТРИ catch_up_recent cycle
+    (см. heroes_platform/heroes_telegram_mcp/scripts/
+    catch_up_recent_telegram_to_supabase.py --deep-backfill-budget=N).
+    Один TelegramClient на cycle: start → forward catch-up → bounded
+    backward deep-backfill (default 500 msgs/cycle) → disconnect.
+    Соединение живёт секунды-минуту, параллельных listeners нет.
 
-  ВНИМАНИЕ: это **template**. Перед загрузкой через launchctl нужно:
+    launchd schedule: оставляем ТОЛЬКО com.rickai.telegram-periodic-catchup
+    (5 мин). Этот файл — историческая ссылка + аварийный one-shot.
 
-    1. Скопировать в ~/Library/LaunchAgents/com.rickai.telegram-deep-backfill-{profile}.plist
-    2. Заменить ВСЕ {{PROFILE}} → конкретный alias (ikrasinsky / lisa / ...).
-    3. Заменить {{WORKSPACE_ROOT}} → абсолютный путь к workspace.
-    4. Установить:
-         launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.rickai.telegram-deep-backfill-{profile}.plist
-         launchctl kickstart -p gui/$UID/com.rickai.telegram-deep-backfill-{profile}
+  Аварийный manual one-shot (НЕ launchd):
+    Если нужен прицельный deep-backfill для clientID NNN (большая история,
+    приоритет владельца) — запускайте ad-hoc:
+        DEEP_BACKFILL_PRIORITY_CHATS=NNN \
+        .venv/bin/python heroes_platform/heroes_telegram_mcp/scripts/\
+        catch_up_recent_telegram_to_supabase.py \
+        --profile ikrasinsky --deep-backfill-budget 5000 \
+        --deep-backfill-per-chat 2000 --deep-backfill-select-limit 5
+    Этот вызов делит соединение с listener-ом по одному endpoint (Mac),
+    но НЕ открывает второй persistent — конфликта нет.
 
-  flock защита: только один экземпляр deep_backfill для одного профиля одновременно
-  (даже если launchd триггерит overlapping interval из-за clock skew).
-
-  StartInterval = 3600 (раз в час). Можно поменять на StartCalendarInterval для
-  cron-style расписания. Дефолт «раз в час» подобран так чтобы:
-    - не пересекаться с 5-мин periodic catch_up (BACKFILL_PERIODIC_INTERVAL_SECONDS=300),
-    - дать каждому из 425+ чатов lisa шанс на ровный rate-limit-friendly proceeding,
-    - не упереться в дневной FloodWait лимит при per-chat-limit=2000.
+  Removal plan:
+    1. На laba/проде убедиться что com.rickai.telegram-deep-backfill-*
+       НЕ загружен (launchctl print gui/$UID/com.rickai.telegram-deep-backfill-*
+       должно вернуть «could not find service»).
+    2. Удалить ~/Library/LaunchAgents/com.rickai.telegram-deep-backfill-*.plist
+       (если был установлен).
+    3. Когда история всех клиентских чатов закроется backward-фазой
+       periodic_catchup — этот файл можно удалить из репо.
 -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.rickai.telegram-deep-backfill-{{PROFILE}}</string>
+  <string>com.rickai.telegram-deep-backfill-DEPRECATED</string>
+
+  <key>Disabled</key>
+  <true/>
 
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/bash</string>
-    <string>-c</string>
-    <string>exec /usr/bin/flock -n /tmp/telegram-deep-backfill-{{PROFILE}}.lock \
-            {{WORKSPACE_ROOT}}/.venv/bin/python \
-            {{WORKSPACE_ROOT}}/heroes_platform/heroes_telegram_mcp/scripts/deep_backfill_history.py \
-            --profile {{PROFILE}} \
-            --budget 10000 \
-            --per-chat 2000 \
-            --select-limit 500</string>
+    <string>/bin/echo</string>
+    <string>DEPRECATED: see file header. deep-backfill now runs inside periodic catch-up cycle.</string>
   </array>
-
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>TELEGRAM_USER</key>
-    <string>{{PROFILE}}</string>
-    <key>PYTHONUNBUFFERED</key>
-    <string>1</string>
-  </dict>
-
-  <key>WorkingDirectory</key>
-  <string>{{WORKSPACE_ROOT}}</string>
-
-  <key>StartInterval</key>
-  <integer>3600</integer>
 
   <key>RunAtLoad</key>
   <false/>
-
-  <key>StandardOutPath</key>
-  <string>/tmp/telegram-deep-backfill-{{PROFILE}}.log</string>
-
-  <key>StandardErrorPath</key>
-  <string>/tmp/telegram-deep-backfill-{{PROFILE}}.err.log</string>
-
-  <key>ThrottleInterval</key>
-  <integer>3600</integer>
-
-  <key>Nice</key>
-  <integer>10</integer>
 </dict>
 </plist>
