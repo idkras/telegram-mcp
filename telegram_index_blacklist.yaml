@@ -1,0 +1,96 @@
+# Telegram → Supabase index guardian rules (SSOT) — pr-hero-gcy (2026-07-01)
+#
+# JTBD: telegram-mcp на КАЖДОЕ входящее сообщение решает по правилам —
+# сохранять / зацензурить значение / не индексировать чат. Коды авторизации,
+# зарплаты, номера карт, паспорта и пароли не утекают в Supabase-индекс.
+#
+# chat_id рассинхронизирован: реестр хранит bare `1866105830`, raw — `-1001866105830`.
+# guard нормализует все формы (strip ^-100 / ^-) и сравнивает по числовому хвосту.
+#
+# 3 уровня решения:
+#   skip    — не писать сообщения чата вовсе (чистые relay кодов)
+#   redact  — писать, но замаскировать значение (карта/паспорт/код/пароль) в тексте
+#   review  — писать, но пометить чат для owner-решения через switchBar (ЗП/финансы/личное)
+#
+# ⚠️ Бизнес-чаты про банк/ЗП/финансы (Heroes фин, Биллинг) НЕ блокируем целиком —
+# там рабочий контекст; маскируем только конкретные значения (карта/паспорт).
+
+version: 2
+
+# --- HARD SKIP: чистые relay кодов/SMS (не индексировать чат целиком) ---
+chats:
+  - id_tail: "1866105830"   # -1001866105830, 65 строк уже проиндексировано (не удаляем — протухли)
+    title: "sms Inbox"
+    reason: "SMS-relay кодов авторизации"
+    action: skip
+  - id_tail: "684318338"
+    title: "sms Inbox"
+    reason: "SMS-relay"
+    action: skip
+  - id_tail: "2809646231"
+    title: "once sms public"
+    reason: "switchBar SMS-relay"
+    action: skip
+  - id_tail: "5083075091"
+    title: "once sms public"
+    reason: "switchBar SMS-relay"
+    action: skip
+  - id_tail: "8513597149"   # «Rick info» — «СМС от Yandex/VFS: код подтверждения», 248 hits
+    title: "Rick info"
+    reason: "SMS-relay: forwards confirmation codes from services"
+    action: skip
+  - id_tail: "7890370978"
+    title: "rickai_secretary_bot"
+    reason: "секретарь-бот, релеит OTP"
+    action: skip
+  - id_tail: "6820083981"
+    title: "Good Secretary Bot"
+    reason: "секретарь-бот"
+    action: skip
+  - id_tail: "8504866006"
+    title: "copostly_secretary_bot"
+    reason: "секретарь-бот"
+    action: skip
+
+title_skip_regex:
+  - '(?i)^once sms public$'
+  - '(?i)\bsms\b.*\binbox\b'
+  - '(?i)\bsecretary[ _]?bot\b'
+  - '(?i)^verify bot$'
+  - '(?i)^verification codes$'
+  - '(?i)\bsms[- ]?relay\b'
+  - '(?i)\botp[- ]?relay\b'
+
+# --- CONTENT REDACT: маскируем ЗНАЧЕНИЕ в тексте любого не-skip чата ---
+# Каждый паттерн — (регекс, что маскируем). Placeholder подставляется вместо match.
+content_redact:
+  - name: card_number
+    regex: '\b(?:\d[ -]?){13,16}\d\b'            # 14-16 цифр с раздел. = номер карты
+    placeholder: "[REDACTED-CARD]"
+  - name: otp_code
+    regex: '(?i)(код подтвержд\w*|код для входа|one[- ]?time|passcode|verification code|otp code|код авторизации|confirmation code)\D{0,20}\d{3,8}'
+    placeholder: "[REDACTED-CODE]"
+  - name: password_value
+    regex: '(?i)(пароль|password|passwd|pwd)\s*[:=]\s*\S{4,}'
+    placeholder: "[REDACTED-PASSWORD]"
+  - name: passport_ru
+    regex: '(?i)паспорт\D{0,15}\d{2}\s?\d{2}\s?\d{6}'
+    placeholder: "[REDACTED-PASSPORT]"
+  - name: snils
+    regex: '(?i)снилс\D{0,10}\d{3}-?\d{3}-?\d{3}[ -]?\d{2}'
+    placeholder: "[REDACTED-SNILS]"
+
+# --- REVIEW: чат пишем, но флагаем owner'у (switchBar) — ЗП/финансы/личное ---
+# Не авто-skip: бизнес-контекст ценен, owner решает индексировать ли чат целиком.
+title_review_regex:
+  - '(?i)\bфин\w*\s+вопрос'
+  - '(?i)биллинг|pnl|акты|сверк'
+  - '(?i)документооборот'
+  - '(?i)зарплат|оклад|payroll'
+  - '(?i)people\s+partner'
+  - '(?i)\bинвайт|доступ'
+
+# content-маркеры для review-скоринга (плотность чувствительного → флаг owner)
+content_review_regex:
+  - '(?i)(зарплат|оклад|\bзп\b|\bsalary\b|аванс)'
+  - '(?i)(паспорт|снилс|инн\s+\d{10,12})'

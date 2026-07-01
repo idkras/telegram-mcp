@@ -51,6 +51,22 @@ _SCHEMA_PROFILE_OVERRIDES: dict[str, str] = {
 }
 
 
+# --- Index guardian (pr-hero-gcy): skip/redact sensitive chats+values on ingest ---
+_GUARD_RULES: Any = None
+
+
+def _guard_rules() -> Any:
+    """Lazy-load index guardian rules once (SSOT: telegram_index_blacklist.yaml)."""
+    global _GUARD_RULES
+    if _GUARD_RULES is None:
+        try:
+            from . import index_guard  # type: ignore
+        except ImportError:  # pragma: no cover — direct-run fallback
+            import index_guard  # type: ignore
+        _GUARD_RULES = (index_guard, index_guard.load_rules())
+    return _GUARD_RULES
+
+
 def _slugify_profile(profile: str) -> str:
     """Normalize profile/client name to a safe snake_case Postgres-identifier slug.
 
@@ -331,11 +347,15 @@ class SupabaseWriter:
         message: Any,
         chat_id: int | str,
         chat_type: str = "unknown",
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | None:
         """Convert a Telethon Message object to a Supabase row dict.
 
         Maps Telethon message fields to telegram_messages_raw schema.
         Stores full message as JSONB in ``raw`` field.
+
+        Index guardian (pr-hero-gcy): returns ``None`` if the chat is blacklisted
+        (pure code/SMS relay) so the caller skips the write; otherwise masks
+        sensitive values (card / OTP / password / passport / SNILS) in ``text``.
         """
         sender_id = None
         sender_name = ""
@@ -370,6 +390,22 @@ class SupabaseWriter:
         msg_date = getattr(message, "date", None)
         message_ts = msg_date.isoformat() if msg_date else None
 
+        text = getattr(message, "text", "") or ""
+
+        # Index guardian: skip blacklisted chats, mask sensitive values.
+        try:
+            guard, rules = _guard_rules()
+            decision = guard.classify_message(chat_id, None, text, rules)
+            if decision.action == "skip":
+                logger.info("guardian skip chat %s: %s", chat_id, decision.reason)
+                return None
+            if decision.categories:
+                text = decision.text
+                if isinstance(raw_data, dict) and raw_data.get("message"):
+                    raw_data["message"] = decision.text
+        except Exception as guard_exc:  # pragma: no cover — never lose a message on guard error
+            logger.warning("index guardian error on chat %s: %s", chat_id, guard_exc)
+
         return {
             "source": "telegram",
             "telegram_user_id": self.telegram_user_id,
@@ -380,7 +416,7 @@ class SupabaseWriter:
             "sender_name": sender_name,
             "sender_username": sender_username,
             "message_ts": message_ts,
-            "text": getattr(message, "text", "") or "",
+            "text": text,
             "raw": raw_data,
         }
 
@@ -476,6 +512,8 @@ class SupabaseWriter:
         """
         try:
             row = self._telethon_message_to_row(message, chat_id, chat_type)
+            if row is None:  # guardian skipped a blacklisted chat — handled, not written
+                return True
             if self._postgres_url:
                 with self._pg_conn() as conn:
                     return self._write_message_pg(conn, row)
@@ -507,7 +545,13 @@ class SupabaseWriter:
         if not messages:
             return 0
 
-        rows = [self._telethon_message_to_row(m, chat_id, chat_type) for m in messages]
+        rows = [
+            r
+            for m in messages
+            if (r := self._telethon_message_to_row(m, chat_id, chat_type)) is not None
+        ]
+        if not rows:  # all messages skipped by guardian (blacklisted chat)
+            return 0
 
         try:
             if self._postgres_url:
