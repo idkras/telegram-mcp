@@ -1,0 +1,129 @@
+# Telegram MCP — chat classification workflow SSOT (pr-hero-ei7, 2026-07-01)
+#
+# JTBD: КАЖДЫЙ чат (9273 ik + 479 lisa) классифицирован в ровно один тип, и у
+# каждого типа — политика индексации в Supabase. Owner видит по типу что
+# индексируется, что маскируется, что не пишется.
+#
+# Классификация — ПРИОРИТЕТНЫЙ каскад: первый матч по порядку `types` побеждает.
+# Правила матчинга (любое из перечисленных → тип):
+#   id_tails        — точный chat_id (любая форма, нормализуется strip ^-100/^-)
+#   title_regex     — регекс по chat_title (case-insensitive)
+#   chat_type_in    — telegram chat_type (private/group/supergroup/channel)
+#   mapping_type    — chat_client_mapping.json поле chat_type
+#   tag_in          — telegram_chat_tags (community/r-founders/…)
+# Последний тип `unclassified` — fallback catch-all (match: always) → 100% покрытие.
+#
+# index_policy (связка с index_guard.py гардианом):
+#   skip    — не индексировать сообщения чата вовсе (чистые relay кодов)
+#   redact  — индексировать, но маскировать значения (карта/паспорт/код) — гардиан
+#   review  — индексировать + флаг owner switchBar (финансы/личное — решение владельца)
+#   index   — индексировать полностью (рабочий контент)
+#
+# Источники (переиспользованы, §Wiring-first):
+#   heroes_platform/scripts/telegram/chat_client_mapping.json  — chat→client mapping
+#   build_telegram_chats_index_section.py _classify_chat        — business-таксономия
+#   [rick.ai]/clients/chats-by-type/README.md                   — chats-by-type
+#   telegram_index_blacklist.yaml                               — guardian skip/redact
+
+version: 1
+
+types:
+  # ── СЕРВИСНЫЕ / БЕЗОПАСНОСТЬ (высший приоритет) ──────────────────────────
+  - name: code_relay
+    label: "Relay кодов / SMS"
+    description: "Чаты-ретрансляторы одноразовых кодов (SMS/OTP/2FA), secretary-боты"
+    index_policy: skip
+    match:
+      id_tails: ["1866105830", "684318338", "2809646231", "5083075091", "8513597149", "7890370978", "6820083981", "8504866006"]
+      title_regex: '(?i)(^once sms public$|\bsms\b.*\binbox\b|\bsecretary[ _]?bot\b|^verification codes$|^verify bot$|rick info)'
+
+  - name: financial
+    label: "Финансы / документооборот"
+    description: "Биллинг, PNL, акты, оплаты, документооборот — рабочий контент, но карты/паспорта маскируются, чат на owner-review"
+    index_policy: review        # + redact значений через гардиан
+    match:
+      title_regex: '(?i)(биллинг|\bpnl\b|акты|сверк|оплат|payment|invoice|счёт[аов]?|документооборот|бухгалтер|payroll)'
+
+  # ── БИЗНЕС / КЛИЕНТЫ ────────────────────────────────────────────────────
+  - name: client_analytics
+    label: "Клиент — отчёты аналитики"
+    description: "Клиентские чаты Rick.ai со сквозной аналитикой «[X + rick.ai] полезные отчёты»"
+    index_policy: index
+    match:
+      title_regex: '(?i)(\[.*rick\.ai.*\]|полезные отчет|helpful report|сквозная аналитик)'
+
+  - name: client_advising
+    label: "Клиент — advising / пилот"
+    description: "Advising-консультации и пилоты по клиентам"
+    index_policy: index
+    match:
+      mapping_type: ["rick-ai-advising"]
+      title_regex: '(?i)(advising|эдвайзинг|консультац|\b(askona|bcs|vipavenue|donplafon|lavsit|salmon\.ph|avtoall|luis|typhoon|starpets)\b)'
+
+  - name: agreements
+    label: "Договорённости"
+    description: "Онбординг-договорённости с клиентами и партнёрами"
+    index_policy: index
+    match:
+      title_regex: '(?i)(договор[её]нност|agreement|onboarding)'
+
+  - name: partner
+    label: "Партнёры"
+    description: "EasyPay, LinkedIn Hero / Copostly, партнёрские интеграции"
+    index_policy: index
+    match:
+      mapping_type: ["easypay"]
+      title_regex: '(?i)(easypay|linkedin.?hero|copostly|партн[её]р|integration)'
+
+  # ── ВНУТРЕННЕЕ / КОМАНДА ────────────────────────────────────────────────
+  - name: heroes_internal
+    label: "Внутренние Heroes / команда"
+    description: "Внутренние чаты Heroes / Product Heroes: менеджмент, найм, орг-вопросы (кроме финансов)"
+    index_policy: review        # HR/зарплаты внутри → owner решает
+    match:
+      title_regex: '(?i)(heroes\.|product heroes|productheroes|\bph\b.*(курс|подготовк|прода)|найм|онбординг|менеджмент|management|hr\b)'
+
+  - name: community
+    label: "Комьюнити"
+    description: "Founders, alumni, гео-сообщества, комьюнити-чаты"
+    index_policy: index
+    match:
+      tag_in: ["community", "r-founders", "r-global", "fff", "founders-es-candidate", "shmit16"]
+      title_regex: '(?i)(комьюнити|community|founders|фаундер|alumni|выпускник|\bгео[- ]|\bges\b)'
+
+  # ── ЛИЧНОЕ ──────────────────────────────────────────────────────────────
+  - name: personal_family
+    label: "Личное / семья"
+    description: "Семья, здоровье, личные inbox-заметки — чувствительное, owner-review"
+    index_policy: review
+    match:
+      title_regex: '(?i)(\bмама\b|\bпапа\b|family|семья|\bжена\b|\bмуж\b|\bсын\b|\bдочь\b|сон.?еда.?энерг|health|здоровь|inbox)'
+
+  - name: subscribed_channel
+    label: "Подписной канал"
+    description: "Каналы-подписки (публичный контент, новости, дайджесты) — низкая чувствительность"
+    index_policy: index
+    match:
+      chat_type_in: ["channel"]
+
+  - name: bot_service
+    label: "Сервисный бот"
+    description: "Прочие боты (Yandex Metrica Bot, GetIDs, аналитические) — не relay кодов"
+    index_policy: index
+    match:
+      title_regex: '(?i)(\bbot\b|_bot$|🤖)'
+
+  - name: personal_dm
+    label: "Личная переписка 1:1"
+    description: "Приватные диалоги с людьми (коллеги, контакты, лиды) — маскируем PII"
+    index_policy: redact
+    match:
+      chat_type_in: ["private"]
+
+  # ── FALLBACK (catch-all → 100% покрытие) ────────────────────────────────
+  - name: unclassified
+    label: "Не классифицировано"
+    description: "Групповые чаты без явного типа — индексируем, но флаг owner для донастройки правил"
+    index_policy: review
+    match:
+      always: true
