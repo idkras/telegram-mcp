@@ -82,9 +82,10 @@ def register_event_handlers(client: Any) -> None:
             chat = await event.get_chat()
             chat_id = event.chat_id or getattr(chat, "id", 0)
             chat_type = _get_chat_type(chat)
+            chat_title = getattr(chat, "title", None)  # D-core-1: guardian title-skip
 
             writer = _get_writer()
-            success = await writer.write_message(message, chat_id, chat_type)
+            success = await writer.write_message(message, chat_id, chat_type, chat_title)
 
             if success:
                 # Update last_seen cursor
@@ -103,9 +104,10 @@ def register_event_handlers(client: Any) -> None:
             chat = await event.get_chat()
             chat_id = event.chat_id or getattr(chat, "id", 0)
             chat_type = _get_chat_type(chat)
+            chat_title = getattr(chat, "title", None)  # D-core-1: guardian title-skip
 
             writer = _get_writer()
-            await writer.write_message(message, chat_id, chat_type)
+            await writer.write_message(message, chat_id, chat_type, chat_title)
         except Exception as exc:
             logger.error("Error handling edited message: %s", exc, exc_info=True)
 

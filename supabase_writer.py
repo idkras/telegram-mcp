@@ -347,6 +347,7 @@ class SupabaseWriter:
         message: Any,
         chat_id: int | str,
         chat_type: str = "unknown",
+        chat_title: str | None = None,
     ) -> dict[str, Any] | None:
         """Convert a Telethon Message object to a Supabase row dict.
 
@@ -393,9 +394,15 @@ class SupabaseWriter:
         text = getattr(message, "text", "") or ""
 
         # Index guardian: skip blacklisted chats, mask sensitive values.
+        # D-core-1 fix (pr-hero-x0p): pass real chat_title so title_skip_regex
+        # actually fires (e.g. a "sms Inbox" chat not in id_tails). Derive from
+        # message.chat when caller didn't thread it.
+        if chat_title is None:
+            _mchat = getattr(message, "chat", None)
+            chat_title = getattr(_mchat, "title", None) if _mchat is not None else None
         try:
             guard, rules = _guard_rules()
-            decision = guard.classify_message(chat_id, None, text, rules)
+            decision = guard.classify_message(chat_id, chat_title, text, rules)
             if decision.action == "skip":
                 logger.info("guardian skip chat %s: %s", chat_id, decision.reason)
                 return None
@@ -403,8 +410,19 @@ class SupabaseWriter:
                 text = decision.text
                 if isinstance(raw_data, dict) and raw_data.get("message"):
                     raw_data["message"] = decision.text
-        except Exception as guard_exc:  # pragma: no cover — never lose a message on guard error
+        except Exception as guard_exc:
+            # D-03 fix: fail CLOSED for code_relay — if the guard errors, still
+            # honour the blacklist id/title skip (cheap, exception-safe) so an
+            # OTP relay never leaks on a redact-path error.
             logger.warning("index guardian error on chat %s: %s", chat_id, guard_exc)
+            try:
+                guard, rules = _guard_rules()
+                blk, why = guard.is_blacklisted(chat_id, chat_title, rules)
+                if blk:
+                    logger.info("guardian fail-closed skip chat %s: %s", chat_id, why)
+                    return None
+            except Exception:
+                pass
 
         return {
             "source": "telegram",
@@ -502,6 +520,7 @@ class SupabaseWriter:
         message: Any,
         chat_id: int | str,
         chat_type: str = "unknown",
+        chat_title: str | None = None,
     ) -> bool:
         """Write a single Telethon message to Supabase.
 
@@ -511,7 +530,7 @@ class SupabaseWriter:
             True if write succeeded, False otherwise.
         """
         try:
-            row = self._telethon_message_to_row(message, chat_id, chat_type)
+            row = self._telethon_message_to_row(message, chat_id, chat_type, chat_title)
             if row is None:  # guardian skipped a blacklisted chat — handled, not written
                 return True
             if self._postgres_url:
@@ -536,6 +555,7 @@ class SupabaseWriter:
         messages: list[Any],
         chat_id: int | str,
         chat_type: str = "unknown",
+        chat_title: str | None = None,
     ) -> int:
         """Write a batch of Telethon messages to Supabase.
 
@@ -548,7 +568,7 @@ class SupabaseWriter:
         rows = [
             r
             for m in messages
-            if (r := self._telethon_message_to_row(m, chat_id, chat_type)) is not None
+            if (r := self._telethon_message_to_row(m, chat_id, chat_type, chat_title)) is not None
         ]
         if not rows:  # all messages skipped by guardian (blacklisted chat)
             return 0
