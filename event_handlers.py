@@ -82,7 +82,11 @@ def register_event_handlers(client: Any) -> None:
             chat = await event.get_chat()
             chat_id = event.chat_id or getattr(chat, "id", 0)
             chat_type = _get_chat_type(chat)
-            chat_title = getattr(chat, "title", None)  # D-core-1: guardian title-skip
+            chat_title = (  # D-core-1 + security-4: bots/User have no .title
+                getattr(chat, "title", None)
+                or getattr(chat, "first_name", None)
+                or getattr(chat, "username", None)
+            )
 
             writer = _get_writer()
             success = await writer.write_message(message, chat_id, chat_type, chat_title)
@@ -104,7 +108,11 @@ def register_event_handlers(client: Any) -> None:
             chat = await event.get_chat()
             chat_id = event.chat_id or getattr(chat, "id", 0)
             chat_type = _get_chat_type(chat)
-            chat_title = getattr(chat, "title", None)  # D-core-1: guardian title-skip
+            chat_title = (  # D-core-1 + security-4: bots/User have no .title
+                getattr(chat, "title", None)
+                or getattr(chat, "first_name", None)
+                or getattr(chat, "username", None)
+            )
 
             writer = _get_writer()
             await writer.write_message(message, chat_id, chat_type, chat_title)

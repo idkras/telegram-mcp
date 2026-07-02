@@ -17,6 +17,14 @@ class _Chat:
         self.title = title
 
 
+class _User:
+    """Telethon User/Bot entity — has NO .title, only first_name/username (security-4)."""
+    def __init__(self, first_name=None, username=None):
+        self.first_name = first_name
+        self.username = username
+        self.title = None  # explicit: User has no title
+
+
 class _Msg:
     def __init__(self, text, chat_title=None, mid=1):
         self.id = mid
@@ -74,6 +82,38 @@ def test_v5_personal_dm_card_redacted():
 def test_v7_legit_client_analytics_saved():
     row = _row(_writer(), "2903143684", "[vipavenue.ru + rick.ai]", "конверсия +12%", True)
     assert row is not None and "конверсия" in row["text"]
+
+
+# ── iter-2 security rework vectors (squad findings) ────────────────────────
+def test_security4_bot_no_title_skipped_by_username():
+    """BREAK#3/#4: a Bot has no .title — derive from first_name → title_skip fires."""
+    w = _writer()
+    msg = _Msg("OTP 4417", mid=1)
+    msg.chat = _User(first_name="sms Inbox")   # bot-like, no title
+    assert w._telethon_message_to_row(msg, "999999002", "private", None) is None
+
+
+def test_security2_fail_closed_returns_none(monkeypatch):
+    """BREAK#5/#6: any guard error → skip (return None), not fail-open leak."""
+    import supabase_writer as _sw
+    monkeypatch.setattr(_sw, "_guard_rules", lambda: (_ for _ in ()).throw(RuntimeError("broken YAML")))
+    w = _writer()
+    msg = _Msg("код 8241", chat_title="once sms public", mid=1)
+    assert w._telethon_message_to_row(msg, "2809646231", "group", "once sms public") is None
+
+
+def test_security3_raw_recursive_redact_no_card_anywhere():
+    """BREAK#7: card must be masked in raw JSONB, not just text."""
+    w = _writer()
+    msg = _Msg("картой 4276 1234 5678 9010", chat_title="Karina", mid=1)
+    # simulate Telethon to_dict with card echoed in nested fwd_from + entities
+    msg.to_dict = lambda: {"id": 1, "message": "картой 4276 1234 5678 9010",
+                           "fwd_from": {"from_name": "картой 4276 1234 5678 9010"}}
+    row = w._telethon_message_to_row(msg, "78126134", "private", "Karina")
+    import json as _json
+    raw_str = _json.dumps(row["raw"], ensure_ascii=False)
+    assert "4276 1234 5678 9010" not in raw_str   # nowhere in raw
+    assert "4276 1234 5678 9010" not in (row["text"] or "")
 
 
 if __name__ == "__main__":
