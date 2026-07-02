@@ -67,6 +67,22 @@ def _guard_rules() -> Any:
     return _GUARD_RULES
 
 
+def _redact_raw_recursive(obj: Any, guard: Any, rules: Any) -> Any:
+    """security-3 fix (pr-hero-x0p): mask sensitive values in EVERY string of the
+    raw JSONB, not just raw["message"]. Telethon to_dict() puts text under varying
+    keys (message/text/raw_text) and echoes it into fwd_from/quote/entities/
+    reply_markup — a single-key redact left `SELECT raw->>'text'` leaking. Walks
+    dict/list/str recursively and applies guard.redact_secrets to each string."""
+    if isinstance(obj, str):
+        red, _ = guard.redact_secrets(obj, rules)
+        return red
+    if isinstance(obj, dict):
+        return {k: _redact_raw_recursive(v, guard, rules) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_redact_raw_recursive(v, guard, rules) for v in obj]
+    return obj
+
+
 def _slugify_profile(profile: str) -> str:
     """Normalize profile/client name to a safe snake_case Postgres-identifier slug.
 
@@ -394,12 +410,19 @@ class SupabaseWriter:
         text = getattr(message, "text", "") or ""
 
         # Index guardian: skip blacklisted chats, mask sensitive values.
-        # D-core-1 fix (pr-hero-x0p): pass real chat_title so title_skip_regex
-        # actually fires (e.g. a "sms Inbox" chat not in id_tails). Derive from
-        # message.chat when caller didn't thread it.
+        # D-core-1 fix: pass real chat_title so title_skip_regex fires (e.g. a
+        # "sms Inbox" chat not in id_tails). Derive from message.chat when caller
+        # didn't thread it. security-4 fix (pr-hero-x0p iter-2): User/Bot entities
+        # have no .title (only .first_name/.username) → fall back so an OTP-bot
+        # named "verify bot" is caught by title/username skip patterns.
         if chat_title is None:
             _mchat = getattr(message, "chat", None)
-            chat_title = getattr(_mchat, "title", None) if _mchat is not None else None
+            if _mchat is not None:
+                chat_title = (
+                    getattr(_mchat, "title", None)
+                    or getattr(_mchat, "first_name", None)
+                    or getattr(_mchat, "username", None)
+                )
         try:
             guard, rules = _guard_rules()
             decision = guard.classify_message(chat_id, chat_title, text, rules)
@@ -407,22 +430,19 @@ class SupabaseWriter:
                 logger.info("guardian skip chat %s: %s", chat_id, decision.reason)
                 return None
             if decision.categories:
+                # security-3 fix: mask the sensitive value everywhere — the visible
+                # text AND recursively every string in the raw JSONB (message/text/
+                # fwd_from/entities/reply_markup) so `SELECT raw->>'text'` can't leak.
                 text = decision.text
-                if isinstance(raw_data, dict) and raw_data.get("message"):
-                    raw_data["message"] = decision.text
+                raw_data = _redact_raw_recursive(raw_data, guard, rules)
         except Exception as guard_exc:
-            # D-03 fix: fail CLOSED for code_relay — if the guard errors, still
-            # honour the blacklist id/title skip (cheap, exception-safe) so an
-            # OTP relay never leaks on a redact-path error.
-            logger.warning("index guardian error on chat %s: %s", chat_id, guard_exc)
-            try:
-                guard, rules = _guard_rules()
-                blk, why = guard.is_blacklisted(chat_id, chat_title, rules)
-                if blk:
-                    logger.info("guardian fail-closed skip chat %s: %s", chat_id, why)
-                    return None
-            except Exception:
-                pass
+            # security-2 fix: fail CLOSED — on ANY guard error skip the message
+            # entirely (return None). The previous "re-check blacklist" path called
+            # the same failing _guard_rules() again → on a broken/missing YAML it
+            # threw twice and the row leaked (fail-OPEN). Dropping the message is
+            # safe; a lost non-secret message is cheaper than a leaked OTP.
+            logger.warning("index guardian error on chat %s: %s — fail-closed skip", chat_id, guard_exc)
+            return None
 
         return {
             "source": "telegram",
