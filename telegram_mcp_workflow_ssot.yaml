@@ -26,7 +26,61 @@
 #   telegram_index_blacklist.yaml                               — guardian skip/redact
 
 version: 1
+name: telegram-mcp
+role: lifecycle-ssot                # описывает ВЕСЬ контур telegram-mcp, не только классификацию
+canonical_repo: idkras/telegram-mcp
+vps: sandbox-ik.infra.node.rickai.net   # 176.9.39.104, systemd юниты telegram-mcp-<profile>
+profiles: [ikrasinsky, lisa]
+supabase_schemas: {ikrasinsky: rick_messages_tasks, lisa: tg_lisa}
 
+# ── ЖИЗНЕННЫЙ ЦИКЛ (8 стадий) — эталон heroes_harness_workflow_ssot.yaml ──────
+# Каждая стадия: script (кто делает) + doctor_check (как проверить) + acceptance.
+# Холистический прогон всех doctor_check → telegram_mcp_doctor.py (non-zero если
+# любой слой красный) → SwiftBar + STOP-flag. «Молчаливая смерть канала»
+# (lisa ingest застрял 9 дн) ловится стадией `ingest` doctor_check.
+lifecycle:
+  - stage: provision_vps
+    script: "ssh sandbox-ik (dolt+supabase reachable, sudo, ufw external-only-ssh)"
+    doctor_check: "ssh sandbox-ik 'echo ok' && curl -sI supabase.rick.ai → 401"
+    acceptance: "VPS доступен по ssh, Supabase reachable с VM"
+
+  - stage: deploy_units
+    script: "clone submodule на VPS + venv + config 2 профиля + systemd telegram-mcp-<profile>"
+    doctor_check: "ssh sandbox-ik systemctl is-active telegram-mcp-ikrasinsky telegram-mcp-lisa → active"
+    acceptance: "оба systemd-юнита active (SwiftBar перестаёт показывать «не настроен»)"
+
+  - stage: session_auth
+    script: "SMS-авторизация КАЖДОГО профиля на VPS (§session-per-endpoint — своя строка)"
+    doctor_check: "session_health_monitor.py --profiles ikrasinsky,lisa → все OK (не REVOKED/AUTHKEY_DUPLICATED/NO_SESSION)"
+    acceptance: "обе сессии authorized, нет коллизии auth key между endpoint'ами"
+    owner_gated: true               # SMS-код приходит владельцу, агент не может сам
+
+  - stage: session_collision_guard
+    script: "validate_session_per_endpoint.py (SHA сравнение .env vs Keychain)"
+    doctor_check: "validate_session_per_endpoint.py → exit 0 (нет reuse строки между endpoint)"
+    acceptance: "ни одна session string не переиспользована на 2 endpoint"
+
+  - stage: ingest
+    script: "catch_up_recent_telegram_to_supabase.py / deep_backfill_history.py на VPS"
+    doctor_check: "max(message_ts) per schema < INGEST_STALE_HOURS (default 6h) назад"
+    acceptance: "свежие сообщения доезжают; ingest НЕ застрял (ловит «застряла 9 дн»)"
+
+  - stage: classify
+    script: "classify_chats.py — тип каждому чату по §types ниже"
+    doctor_check: "classify_chats.py coverage == 100% (9273 ik + 479 lisa)"
+    acceptance: "каждый чат имеет ровно один тип"
+
+  - stage: guardian_write
+    script: "supabase_writer + index_guard: применить index_policy типа (skip/redact/review/index)"
+    doctor_check: "0 сообщений из code_relay чатов (§types id_tails) в *.telegram_messages_raw"
+    acceptance: "relay кодов НЕ индексируется; personal_dm маскируется"
+
+  - stage: monitor_surface
+    script: "telegram_mcp_doctor.py (cron) → SwiftBar telegram_endpoints.py + STOP-flag"
+    doctor_check: "swiftbar cache generated_at < SWIFTBAR_STALE_MIN (default 15 min)"
+    acceptance: "владелец видит красный слой в SwitchBar сразу, не через 9 дней"
+
+# ── КЛАССИФИКАЦИЯ ЧАТОВ (стадия `classify`) ─────────────────────────────────
 types:
   # ── СЕРВИСНЫЕ / БЕЗОПАСНОСТЬ (высший приоритет) ──────────────────────────
   - name: code_relay
