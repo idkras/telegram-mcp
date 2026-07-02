@@ -83,6 +83,24 @@ def _redact_raw_recursive(obj: Any, guard: Any, rules: Any) -> Any:
     return obj
 
 
+async def _resolve_chat_title(telethon_client: Any, chat_id: Any) -> str | None:
+    """security-1 fix (pr-hero-x0p): backfill uses iter_messages where msg.chat is
+    NOT hydrated → derive-from-message fallback returns None → title_skip never fires
+    → OTP relay leaks on backfill. Resolve the title once per chat via get_entity so
+    backfill honours the same title/username skip as live NewMessage. Fallback chain
+    title→first_name→username covers User/Bot entities (no .title). Returns None on
+    any resolution error (writer still has content-redact + id_tail backstop)."""
+    try:
+        ent = await telethon_client.get_entity(int(chat_id))
+    except Exception:  # noqa: BLE001 — resolution best-effort; None keeps id/content guards
+        return None
+    return (
+        getattr(ent, "title", None)
+        or getattr(ent, "first_name", None)
+        or getattr(ent, "username", None)
+    )
+
+
 def _slugify_profile(profile: str) -> str:
     """Normalize profile/client name to a safe snake_case Postgres-identifier slug.
 
@@ -1096,6 +1114,9 @@ class SupabaseWriter:
             # Resume: get messages OLDER than last_backfill (lower ids)
             max_id = cursor["last_backfill_message_id"]
 
+        # security-1: resolve title once so backfill honours title/username skip
+        chat_title = await _resolve_chat_title(telethon_client, chat_id)
+
         total_written = 0
         batch: list[Any] = []
         min_id_seen = float("inf")
@@ -1115,13 +1136,14 @@ class SupabaseWriter:
                         batch,
                         chat_id,
                         chat_type,
+                        chat_title,
                     )
                     total_written += written
                     batch = []
 
             # Write remaining
             if batch:
-                written = await self.write_messages_batch(batch, chat_id, chat_type)
+                written = await self.write_messages_batch(batch, chat_id, chat_type, chat_title)
                 total_written += written
 
             # Update cursor
@@ -1150,6 +1172,8 @@ class SupabaseWriter:
             return 0
 
         last_seen_message_id = int(cursor["last_seen_message_id"])
+        # security-1: resolve title once so catch-up honours title/username skip
+        chat_title = await _resolve_chat_title(telethon_client, chat_id)
         total_written = 0
         batch: list[Any] = []
         max_id_seen = last_seen_message_id
@@ -1166,11 +1190,21 @@ class SupabaseWriter:
                     max_id_seen = msg.id
 
                 if len(batch) >= self.batch_size:
-                    total_written += await self.write_messages_batch(batch, chat_id, chat_type)
+                    total_written += await self.write_messages_batch(
+                        batch,
+                        chat_id,
+                        chat_type,
+                        chat_title,
+                    )
                     batch = []
 
             if batch:
-                total_written += await self.write_messages_batch(batch, chat_id, chat_type)
+                total_written += await self.write_messages_batch(
+                    batch,
+                    chat_id,
+                    chat_type,
+                    chat_title,
+                )
 
             if max_id_seen > last_seen_message_id:
                 await self.update_chat_cursor(
