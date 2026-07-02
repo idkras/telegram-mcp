@@ -240,6 +240,88 @@ class TestSupabaseWriterInit:
         assert writer._client is None
 
 
+class TestBackfillGuardianTitle:
+    @pytest.mark.asyncio
+    async def test_backfill_resolves_chat_title_for_guardian_skip_rules(self):
+        from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
+
+        writer = SupabaseWriter.__new__(SupabaseWriter)
+        writer.batch_size = 2
+        writer.get_chat_cursor = AsyncMock(return_value=None)
+        writer.update_chat_cursor = AsyncMock()
+
+        batch_calls = []
+
+        async def write_messages_batch(batch, chat_id, chat_type="unknown", chat_title=None):
+            batch_calls.append((list(batch), chat_id, chat_type, chat_title))
+            return len(batch)
+
+        writer.write_messages_batch = write_messages_batch
+
+        class Client:
+            async def get_entity(self, chat_id):
+                self.resolved_chat_id = chat_id
+                entity = MagicMock()
+                entity.title = "verify bot"
+                entity.first_name = None
+                entity.username = "verify_bot"
+                return entity
+
+            async def iter_messages(self, **_kwargs):
+                for msg_id in (3, 2, 1):
+                    msg = MagicMock()
+                    msg.id = msg_id
+                    yield msg
+
+        client = Client()
+
+        written = await writer.backfill_chat(client, "-100123", chat_type="group", limit=3)
+
+        assert written == 3
+        assert client.resolved_chat_id == -100123
+        assert [call[3] for call in batch_calls] == ["verify bot", "verify bot"]
+
+    @pytest.mark.asyncio
+    async def test_catch_up_resolves_chat_title_for_guardian_skip_rules(self):
+        from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
+
+        writer = SupabaseWriter.__new__(SupabaseWriter)
+        writer.batch_size = 2
+        writer.get_chat_cursor = AsyncMock(return_value={"last_seen_message_id": 10})
+        writer.update_chat_cursor = AsyncMock()
+
+        batch_calls = []
+
+        async def write_messages_batch(batch, chat_id, chat_type="unknown", chat_title=None):
+            batch_calls.append((list(batch), chat_id, chat_type, chat_title))
+            return len(batch)
+
+        writer.write_messages_batch = write_messages_batch
+
+        class Client:
+            async def get_entity(self, chat_id):
+                self.resolved_chat_id = chat_id
+                entity = MagicMock()
+                entity.title = None
+                entity.first_name = None
+                entity.username = "verify_bot"
+                return entity
+
+            async def iter_messages(self, **_kwargs):
+                for msg_id in (11, 12, 13):
+                    msg = MagicMock()
+                    msg.id = msg_id
+                    yield msg
+
+        client = Client()
+
+        written = await writer.catch_up_recent(client, "-100123", chat_type="group", limit=3)
+
+        assert written == 3
+        assert client.resolved_chat_id == -100123
+        assert [call[3] for call in batch_calls] == ["verify_bot", "verify_bot"]
+
+
 class TestRuntimeHealthEvaluation:
     def test_runtime_health_requires_listener_heartbeat(self):
         from heroes_platform.heroes_telegram_mcp.supabase_writer import _evaluate_runtime_health
