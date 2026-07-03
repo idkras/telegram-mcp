@@ -224,6 +224,7 @@ class SupabaseWriter:
         postgres_url: str | None = None,
     ) -> None:
         self._client: Any | None = None
+        self._pg_pool: Any | None = None   # R3 D5: bounded connection pool (lazy)
         self.telegram_user_id = telegram_user_id
         # Schema-per-profile: каждый аккаунт пишет в свою схему (data не смешивается).
         self.schema = _schema_for_profile(telegram_user_id)
@@ -310,16 +311,35 @@ class SupabaseWriter:
         except Exception as exc:
             return False, f"Telegram LABA runtime probe failed: {exc}"
 
+    def _get_pool(self) -> Any:
+        """R3 D5 fix (pr-hero-1u1): lazily create a BOUNDED connection pool. Before,
+        every _pg_conn() opened a fresh psycopg2.connect — 200 chats × N batches during
+        backfill blew past Postgres max_connections → 'too many connections' → cursor
+        stuck → lag grows geometrically. A ThreadedConnectionPool caps concurrency and
+        reuses connections. Bounds via TELEGRAM_PG_POOL_MIN/MAX (default 1..8)."""
+        if self._pg_pool is None:
+            from psycopg2.pool import ThreadedConnectionPool
+
+            minc = int(os.getenv("TELEGRAM_PG_POOL_MIN", "1"))
+            maxc = int(os.getenv("TELEGRAM_PG_POOL_MAX", "8"))
+            self._pg_pool = ThreadedConnectionPool(minc, maxc, self._postgres_url)
+        return self._pg_pool
+
     @contextmanager
     def _pg_conn(self) -> Iterator[Any]:
-        """Yield psycopg2 connection when using direct Postgres. Caller must not use when _postgres_url is None."""
-        import psycopg2
-
-        conn = psycopg2.connect(self._postgres_url)
+        """Yield a pooled psycopg2 connection (R3 D5). Caller must not use when
+        _postgres_url is None. Connection is rolled back and returned to the pool on
+        exit so an aborted transaction never poisons the next borrower."""
+        pool = self._get_pool()
+        conn = pool.getconn()
         try:
             yield conn
         finally:
-            conn.close()
+            try:
+                conn.rollback()   # clear any aborted txn before reuse
+            except Exception:  # noqa: BLE001
+                pass
+            pool.putconn(conn)
 
     def _get_runtime_activity(self) -> tuple[datetime | None, datetime | None]:
         """Return latest listener heartbeat timestamp and latest message timestamp."""
