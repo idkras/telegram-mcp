@@ -158,6 +158,50 @@ def check_ingest(s) -> dict:
         return {"layer": "ingest", "ok": None, "detail": f"SKIP ({str(e)[:60]})"}
 
 
+# Bug I5-consumer (design+falsifier review pr-hero-1u1): the catch-up cycle writes
+# catchup_boot/catchup_heartbeat markers, but WITHOUT a reader they were theatre. This
+# is the consumer. check_ingest (max message_ts, 6h) catches «messages went stale»;
+# this catches «the CYCLE ITSELF stopped running» (dead-session exit-1 loop, launchd not
+# firing, crash mid-cycle) within CATCHUP_STALE_MIN (default 15m ≈ 3× the 5-min cron)
+# instead of the full 6h window. A last run of catchup_session_dead is an explicit RED so
+# an exit-1 loop cannot hide as «just no new marker».
+CATCHUP_STALE_MIN = float(os.environ.get("CATCHUP_STALE_MIN", "15"))
+
+
+def check_catchup_freshness(s) -> dict:
+    try:
+        conn = _pg(); cur = conn.cursor()
+        ages = {}
+        dead = {}
+        for prof, sch in _schemas(s).items():
+            cur.execute(
+                f"select mode, extract(epoch from (now() - max(started_at)))/60.0 "
+                f"from {sch}.telegram_ingest_runs "
+                f"where mode in ('catchup_boot','catchup_heartbeat','catchup_session_dead') "
+                f"group by mode order by max(started_at) desc;"
+            )
+            rows = cur.fetchall()
+            if not rows:
+                ages[prof] = None  # never ran → INCONCLUSIVE (fresh profile)
+                continue
+            latest_mode, latest_age = rows[0]
+            ages[prof] = round(float(latest_age), 1)
+            if latest_mode == "catchup_session_dead":
+                dead[prof] = "session_dead"
+            elif float(latest_age) > CATCHUP_STALE_MIN:
+                dead[prof] = round(float(latest_age), 1)
+        conn.close()
+        if dead:  # cycle stopped OR last run reported a dead session → RED
+            return {"layer": "catchup_freshness", "ok": False,
+                    "detail": f"minutes_since_last_cycle={ages} stopped(>{CATCHUP_STALE_MIN}m or dead)={dead}"}
+        if all(v is None for v in ages.values()):
+            return {"layer": "catchup_freshness", "ok": None,
+                    "detail": f"INCONCLUSIVE — no catch-up cycle ever recorded {list(ages)}"}
+        return {"layer": "catchup_freshness", "ok": True, "detail": f"minutes_since_last_cycle={ages}"}
+    except Exception as e:  # noqa: BLE001
+        return {"layer": "catchup_freshness", "ok": None, "detail": f"SKIP ({str(e)[:60]})"}
+
+
 def check_classify(s) -> dict:
     try:
         try:
@@ -265,7 +309,8 @@ def check_monitor_surface(s) -> dict:
 
 
 CHECKS = [check_deploy_units, check_session_collision, check_session_auth,
-          check_ingest, check_classify, check_guardian_write, check_monitor_surface]
+          check_ingest, check_catchup_freshness, check_classify,
+          check_guardian_write, check_monitor_surface]
 
 
 def run() -> list[dict]:
