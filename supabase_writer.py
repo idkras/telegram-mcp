@@ -998,22 +998,19 @@ class SupabaseWriter:
     async def start_ingest_run(self, mode: str = "poll_updates") -> str:
         """Start a new ingest run and return its run_id."""
         run_id = str(uuid.uuid4())
-        try:
-            if self._postgres_url:
-                with self._pg_conn() as conn:
-                    self._start_ingest_run_pg(conn, run_id, mode)
-            else:
-                self._table(TABLE_RUNS).insert(
-                    {
-                        "run_id": run_id,
-                        "telegram_user_id": self.telegram_user_id,
-                        "mode": mode,
-                        "started_at": datetime.now(tz=timezone.utc).isoformat(),
-                        "status": "running",
-                    }
-                ).execute()
-        except Exception as exc:
-            logger.warning("Failed to start ingest run: %s", exc)
+        if self._postgres_url:
+            with self._pg_conn() as conn:
+                self._start_ingest_run_pg(conn, run_id, mode)
+        else:
+            self._table(TABLE_RUNS).insert(
+                {
+                    "run_id": run_id,
+                    "telegram_user_id": self.telegram_user_id,
+                    "mode": mode,
+                    "started_at": datetime.now(tz=timezone.utc).isoformat(),
+                    "status": "running",
+                }
+            ).execute()
         return run_id
 
     def _finish_ingest_run_pg(
@@ -1053,25 +1050,20 @@ class SupabaseWriter:
         error: str | None = None,
     ) -> None:
         """Mark an ingest run as finished."""
-        try:
-            if self._postgres_url:
-                with self._pg_conn() as conn:
-                    self._finish_ingest_run_pg(
-                        conn, run_id, processed_chats, inserted_messages, error
-                    )
-                return
-            status = "failed" if error else "success"
-            update: dict[str, Any] = {
-                "finished_at": datetime.now(tz=timezone.utc).isoformat(),
-                "processed_chats": processed_chats,
-                "inserted_messages": inserted_messages,
-                "status": status,
-            }
-            if error:
-                update["last_error"] = error[:500]
-            self._table(TABLE_RUNS).update(update).eq("run_id", run_id).execute()
-        except Exception as exc:
-            logger.warning("Failed to finish ingest run %s: %s", run_id, exc)
+        if self._postgres_url:
+            with self._pg_conn() as conn:
+                self._finish_ingest_run_pg(conn, run_id, processed_chats, inserted_messages, error)
+            return
+        status = "failed" if error else "success"
+        update: dict[str, Any] = {
+            "finished_at": datetime.now(tz=timezone.utc).isoformat(),
+            "processed_chats": processed_chats,
+            "inserted_messages": inserted_messages,
+            "status": status,
+        }
+        if error:
+            update["last_error"] = error[:500]
+        self._table(TABLE_RUNS).update(update).eq("run_id", run_id).execute()
 
     async def record_runtime_event(
         self,
@@ -1118,6 +1110,8 @@ class SupabaseWriter:
         chat_title = await _resolve_chat_title(telethon_client, chat_id)
 
         total_written = 0
+        seen_count = 0
+        partial_write = False
         batch: list[Any] = []
         min_id_seen = float("inf")
 
@@ -1127,6 +1121,7 @@ class SupabaseWriter:
                 iter_kwargs["max_id"] = max_id
 
             async for msg in telethon_client.iter_messages(**iter_kwargs):
+                seen_count += 1
                 batch.append(msg)
                 if msg.id < min_id_seen:
                     min_id_seen = msg.id
@@ -1139,20 +1134,42 @@ class SupabaseWriter:
                         chat_title,
                     )
                     total_written += written
+                    if written < len(batch):
+                        partial_write = True
+                        logger.warning(
+                            "Backfill partial write for chat %s: wrote %d/%d; cursor not advanced",
+                            chat_id,
+                            written,
+                            len(batch),
+                        )
+                        batch = []
+                        break
                     batch = []
 
             # Write remaining
-            if batch:
+            if batch and not partial_write:
                 written = await self.write_messages_batch(batch, chat_id, chat_type, chat_title)
                 total_written += written
+                if written < len(batch):
+                    partial_write = True
+                    logger.warning(
+                        "Backfill partial write for chat %s: wrote %d/%d; cursor not advanced",
+                        chat_id,
+                        written,
+                        len(batch),
+                    )
 
-            # Update cursor
-            if total_written > 0 and min_id_seen < float("inf"):
+            # Update cursor only when every seen message in this pass was handled.
+            # If a batch reports partial success, we do not know which message ids
+            # failed, so advancing the cursor would make unwritten rows invisible
+            # to the next run (Supabase #62 false-green class).
+            if not partial_write and total_written > 0 and min_id_seen < float("inf"):
                 await self.update_chat_cursor(
                     chat_id,
                     last_backfill_message_id=int(min_id_seen),
-                    backfill_completed=(total_written < limit),
                 )
+            elif not partial_write and seen_count == 0:
+                await self.update_chat_cursor(chat_id, backfill_completed=True)
 
         except Exception as exc:
             logger.warning("Backfill error for chat %s: %s", chat_id, exc)
@@ -1175,6 +1192,7 @@ class SupabaseWriter:
         # security-1: resolve title once so catch-up honours title/username skip
         chat_title = await _resolve_chat_title(telethon_client, chat_id)
         total_written = 0
+        partial_write = False
         batch: list[Any] = []
         max_id_seen = last_seen_message_id
 
@@ -1190,23 +1208,43 @@ class SupabaseWriter:
                     max_id_seen = msg.id
 
                 if len(batch) >= self.batch_size:
-                    total_written += await self.write_messages_batch(
+                    written = await self.write_messages_batch(
                         batch,
                         chat_id,
                         chat_type,
                         chat_title,
                     )
+                    total_written += written
+                    if written < len(batch):
+                        partial_write = True
+                        logger.warning(
+                            "Recent catch-up partial write for chat %s: wrote %d/%d; cursor not advanced",
+                            chat_id,
+                            written,
+                            len(batch),
+                        )
+                        batch = []
+                        break
                     batch = []
 
-            if batch:
-                total_written += await self.write_messages_batch(
+            if batch and not partial_write:
+                written = await self.write_messages_batch(
                     batch,
                     chat_id,
                     chat_type,
                     chat_title,
                 )
+                total_written += written
+                if written < len(batch):
+                    partial_write = True
+                    logger.warning(
+                        "Recent catch-up partial write for chat %s: wrote %d/%d; cursor not advanced",
+                        chat_id,
+                        written,
+                        len(batch),
+                    )
 
-            if max_id_seen > last_seen_message_id:
+            if not partial_write and max_id_seen > last_seen_message_id:
                 await self.update_chat_cursor(
                     chat_id,
                     last_seen_message_id=max_id_seen,

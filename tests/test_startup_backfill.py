@@ -126,11 +126,11 @@ class FakeWriter:
         self.catch_up_calls.append((int(chat_id), chat_type, limit))
         return int(self._catch_up_returns.get(int(chat_id), 0))
 
-    async def write_messages_batch(self, batch, chat_id, chat_type):
+    async def write_messages_batch(self, batch, chat_id, chat_type, chat_title=None):
         if int(chat_id) in self._fail_chats:
             raise RuntimeError("simulated write failure")
         n = len(batch)
-        self.written_batches.append((int(chat_id), n))
+        self.written_batches.append((int(chat_id), n, chat_title))
         return n
 
     async def update_chat_cursor(self, chat_id, last_seen_message_id=None, **kw):
@@ -209,6 +209,25 @@ def test_seed_no_truncation_when_under_limit():
     written, truncated = run(_seed_recent(client, writer, 301, "private", limit=100))
     assert written == 2
     assert truncated is False
+
+
+def test_seed_partial_batch_does_not_advance_cursor_for_failed_batch():
+    """Supabase #62: partial write count must not advance cursor across unwritten ids."""
+
+    class PartialWriter(FakeWriter):
+        async def write_messages_batch(self, batch, chat_id, chat_type, chat_title=None):
+            self.written_batches.append((int(chat_id), len(batch), chat_title))
+            return 1
+
+    msgs = [FakeMsg(1), FakeMsg(2)]
+    writer = PartialWriter()
+    client = FakeClient([], messages_by_chat={302: msgs})
+
+    written, truncated = run(_seed_recent(client, writer, 302, "private", limit=100))
+
+    assert written == 1
+    assert truncated is True
+    assert writer.cursor_updates == []
 
 
 # ── T3: N chats → all scanned, aggregate ──────────────────────────────────────

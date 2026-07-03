@@ -322,6 +322,117 @@ class TestBackfillGuardianTitle:
         assert [call[3] for call in batch_calls] == ["verify_bot", "verify_bot"]
 
 
+class TestPartialBatchCursorSafety:
+    class Msg:
+        def __init__(self, msg_id):
+            self.id = msg_id
+
+    class Client:
+        async def get_entity(self, chat_id):
+            return None
+
+        async def iter_messages(self, **kwargs):
+            start = int(kwargs.get("min_id") or 0) + 1
+            for msg_id in range(start, start + 10):
+                yield TestPartialBatchCursorSafety.Msg(msg_id)
+
+    @pytest.mark.asyncio
+    async def test_catch_up_does_not_advance_cursor_after_partial_batch_write(self):
+        from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
+
+        writer = SupabaseWriter.__new__(SupabaseWriter)
+        writer.batch_size = 10
+        writer.get_chat_cursor = AsyncMock(return_value={"last_seen_message_id": 10})
+        writer.update_chat_cursor = AsyncMock(return_value=True)
+
+        async def partial_write(batch, chat_id, chat_type="unknown", chat_title=None):
+            return 5
+
+        writer.write_messages_batch = partial_write
+
+        written = await writer.catch_up_recent(self.Client(), "123", limit=10)
+
+        assert written == 5
+        writer.update_chat_cursor.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_catch_up_advances_cursor_after_full_batch_write(self):
+        from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
+
+        writer = SupabaseWriter.__new__(SupabaseWriter)
+        writer.batch_size = 10
+        writer.get_chat_cursor = AsyncMock(return_value={"last_seen_message_id": 10})
+        writer.update_chat_cursor = AsyncMock(return_value=True)
+
+        async def full_write(batch, chat_id, chat_type="unknown", chat_title=None):
+            return len(batch)
+
+        writer.write_messages_batch = full_write
+
+        written = await writer.catch_up_recent(self.Client(), "123", limit=10)
+
+        assert written == 10
+        writer.update_chat_cursor.assert_awaited_once_with("123", last_seen_message_id=20)
+
+    @pytest.mark.asyncio
+    async def test_backfill_does_not_advance_cursor_after_partial_batch_write(self):
+        from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
+
+        writer = SupabaseWriter.__new__(SupabaseWriter)
+        writer.batch_size = 10
+        writer.get_chat_cursor = AsyncMock(return_value=None)
+        writer.update_chat_cursor = AsyncMock(return_value=True)
+
+        async def partial_write(batch, chat_id, chat_type="unknown", chat_title=None):
+            return 5
+
+        writer.write_messages_batch = partial_write
+
+        written = await writer.backfill_chat(self.Client(), "123", limit=10)
+
+        assert written == 5
+        writer.update_chat_cursor.assert_not_awaited()
+
+
+class TestIngestRunFailureVisibility:
+    class RaisingQuery:
+        def insert(self, *_args, **_kwargs):
+            return self
+
+        def update(self, *_args, **_kwargs):
+            return self
+
+        def eq(self, *_args, **_kwargs):
+            return self
+
+        def execute(self):
+            raise RuntimeError("supabase down")
+
+    @pytest.mark.asyncio
+    async def test_start_ingest_run_surfaces_table_write_failure(self):
+        from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
+
+        writer = SupabaseWriter.__new__(SupabaseWriter)
+        writer.telegram_user_id = "ikrasinsky"
+        writer._postgres_url = None
+        writer._table = MagicMock(return_value=self.RaisingQuery())
+
+        with pytest.raises(RuntimeError, match="supabase down"):
+            await writer.start_ingest_run("listener_heartbeat")
+
+    @pytest.mark.asyncio
+    async def test_record_runtime_event_surfaces_marker_write_failure(self):
+        from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
+
+        writer = SupabaseWriter.__new__(SupabaseWriter)
+        writer.telegram_user_id = "ikrasinsky"
+        writer._postgres_url = None
+        writer._table = MagicMock(return_value=self.RaisingQuery())
+
+        with pytest.raises(RuntimeError, match="supabase down"):
+            await writer.record_runtime_event("listener_heartbeat")
+
+
 class TestRuntimeHealthEvaluation:
     def test_runtime_health_requires_listener_heartbeat(self):
         from heroes_platform.heroes_telegram_mcp.supabase_writer import _evaluate_runtime_health
