@@ -1317,6 +1317,7 @@ def _evaluate_runtime_health(
     latest_message_at: datetime | None,
     max_staleness_seconds: int,
     transport_message: str,
+    max_message_staleness_seconds: int | None = None,
 ) -> tuple[bool, str]:
     if listener_event_at is None:
         return (
@@ -1340,6 +1341,24 @@ def _evaluate_runtime_health(
     if latest_message_at is not None:
         latest_message_age = now - latest_message_at
         details.append(f"latest message age={int(latest_message_age.total_seconds())}s")
+        # R3 D4 fix (pr-hero-1u1): heartbeat freshness ≠ ingest freshness. A live
+        # listener that writes a heartbeat every 60s while NO message lands across
+        # ALL chats for hours = silently stalled ingest (the "lisa 9 days" incident).
+        # A separate, conservative message-staleness threshold catches it so the
+        # unit's own healthcheck goes unhealthy — not just the external doctor.
+        if max_message_staleness_seconds is None:
+            max_message_staleness_seconds = int(
+                os.getenv("TELEGRAM_MESSAGE_MAX_STALENESS_SECONDS", "21600")  # 6h
+            )
+        if max_message_staleness_seconds > 0 and latest_message_age > timedelta(
+            seconds=max_message_staleness_seconds
+        ):
+            return (
+                False,
+                "Telegram LABA runtime unhealthy: INGEST STALLED — heartbeat live but "
+                f"latest message is {int(latest_message_age.total_seconds())}s old "
+                f"(> {max_message_staleness_seconds}s); {transport_message}",
+            )
     else:
         details.append("latest message age=none yet")
 
