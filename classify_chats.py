@@ -88,6 +88,21 @@ def _conn():
     return psycopg2.connect(url, connect_timeout=25)
 
 
+def coverage(res: dict[str, Any]) -> float:
+    """Real classification coverage = % of chats put into a NON-fallback type.
+
+    Bug C1 (pr-hero-i5i): the old formula was `100 * total / total` → always 100%,
+    a tautology that hid 9000/9273 chats sitting in `unclassified`. Coverage now
+    counts only chats that actually matched a real type (total minus unclassified).
+    """
+    total = res.get("total", 0) or 0
+    if total <= 0:
+        return 0.0
+    unclassified = (res.get("counts") or {}).get("unclassified", 0)
+    classified = total - unclassified
+    return 100.0 * classified / total
+
+
 def run(schema: str) -> dict[str, Any]:
     types = load_ssot()
     mapping = load_mapping()
@@ -133,8 +148,8 @@ def main(argv: list[str]) -> int:
         n = res["counts"].get(name, 0)
         if n:
             print(f"  {name:20s} [{res['policy'][name]:6s}] : {n}")
-    cov = 100.0 * res["total"] / res["total"] if res["total"] else 0
-    print(f"\n  COVERAGE: {res['total']}/{res['total']} = {cov:.1f}%  "
+    cov = coverage(res)
+    print(f"\n  COVERAGE: {classified}/{res['total']} = {cov:.1f}%  "
           f"(classified-non-fallback {classified}, unclassified {res['counts'].get('unclassified',0)})")
     return 0
 

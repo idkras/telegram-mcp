@@ -95,6 +95,13 @@ enable(__file__)
 # ПОТОМ импортируем heroes_platform модули
 from heroes_platform.shared.credentials_wrapper import get_service_credentials
 from heroes_platform.shared.logging_utils import add_rotating_file_handler
+
+# Honest CLI-probe helpers (pr-hero-i5i R2). Pure, dependency-free module next to
+# main.py; keeps --list-tools / --test / --healthcheck logic testable in isolation.
+try:
+    import main_cli_helpers  # type: ignore
+except ImportError:  # when main.py lives inside the heroes_platform package tree
+    from heroes_platform.heroes_telegram_mcp import main_cli_helpers  # type: ignore
 from heroes_platform.heroes_telegram_mcp.chat_search_utils import (
     search_chats_by_keyword_impl,
     get_all_chats_list_impl,
@@ -340,25 +347,10 @@ def _exit_for_cli_probe() -> None:
         print("FastMCP-based server for Telegram API")
         print("Status: Active")
         sys.exit(0)
-    if arg == "--list-tools":
-        print("Available Telegram MCP Tools:")
-        print("=" * 50)
-        print("1.  get_chats")
-        print("2.  get_messages")
-        print("3.  get_contact_ids")
-        print("4.  get_chat")
-        print("5.  get_chat_metadata")
-        print("6.  get_direct_chat_by_contact")
-        print("7.  get_contact_chats")
-        print("8.  get_last_interaction")
-        print("9.  get_message_context")
-        print("10. get_me")
-        print("11. get_participants")
-        print("12. get_admins")
-        print("... and 60+ more tools")
-        print("=" * 50)
-        print("Total: 73+ tools available")
-        sys.exit(0)
+    # NOTE: --list-tools is handled in the late dispatcher (after `mcp` is built),
+    # NOT here — the honest count/names come from the live FastMCP registry, which
+    # only exists after all @mcp.tool() decorators run (bug M2, pr-hero-i5i). Handling
+    # it early forced the hardcoded «73+» that drifted from reality.
 
 
 _exit_for_cli_probe()
@@ -461,11 +453,8 @@ async def _run_auth_smoke_test(target_client: TelegramClient) -> tuple[bool, str
             await target_client.disconnect()
 
 
-async def _run_runtime_healthcheck() -> tuple[bool, str]:
-    """Validate the non-interactive LABA runtime contract for Telegram ingestion."""
-    if os.getenv("LABA_MODE") != "true":
-        return True, "Telegram runtime OK (LABA_MODE disabled)"
-
+async def _laba_supabase_probe() -> tuple[bool, str]:
+    """LABA-mode branch: Supabase reachability (unchanged behaviour, extracted)."""
     try:
         from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
 
@@ -476,6 +465,23 @@ async def _run_runtime_healthcheck() -> tuple[bool, str]:
         return True, message
     except Exception as exc:
         return False, f"Telegram LABA runtime probe failed: {exc}"
+
+
+async def _run_runtime_healthcheck() -> tuple[Any, str]:
+    """Validate the runtime contract for Telegram ingestion.
+
+    Bug M3 (pr-hero-i5i): the old code returned a blind (True, "OK") for every
+    non-LABA endpoint — a local endpoint with a dead session reported healthy. The
+    honest logic lives in main_cli_helpers.run_runtime_healthcheck: non-LABA still
+    verifies the session (connect + is_user_authorized); revoked → False; unable to
+    probe → None (INCONCLUSIVE). LABA delegates to the Supabase probe as before.
+    """
+    laba_mode = os.getenv("LABA_MODE") == "true"
+    return await main_cli_helpers.run_runtime_healthcheck(
+        laba_mode=laba_mode,
+        client=client,
+        laba_probe=_laba_supabase_probe,
+    )
 
 
 async def _sent_as_display(tg_client: TelegramClient) -> str:
@@ -3416,13 +3422,24 @@ if __name__ == "__main__":
 
     if len(sys.argv) > 1:
         arg = sys.argv[1]
-        if arg == "--test":
+        if arg == "--list-tools":
+            # M2 (pr-hero-i5i): print the REAL registry, not a hardcoded «73+».
             try:
-                if client is not None:
-                    print("OK")
-                    sys.exit(0)
-                print("Telegram MCP client not initialized", file=sys.stderr)
+                listing = main_cli_helpers.list_tools_listing(mcp._tool_manager)
+                if listing["count"] == 0:
+                    print("Telegram MCP --list-tools: registry empty (import error?)", file=sys.stderr)
+                    sys.exit(1)
+                print(main_cli_helpers.render_list_tools(listing))
+                sys.exit(0)
+            except Exception as e:
+                print(f"Telegram MCP --list-tools failed: {e}", file=sys.stderr)
                 sys.exit(1)
+        elif arg == "--test":
+            # M1 (pr-hero-i5i): verify authorization, not just «client is not None».
+            try:
+                ok, message = asyncio.run(main_cli_helpers.run_test_probe(client))
+                print(message if ok else message, file=sys.stdout if ok else sys.stderr)
+                sys.exit(0 if ok else 1)
             except Exception as e:
                 print(f"Telegram MCP test failed: {e}", file=sys.stderr)
                 sys.exit(1)
@@ -3437,8 +3454,10 @@ if __name__ == "__main__":
         elif arg == "--healthcheck":
             try:
                 ok, message = asyncio.run(_run_runtime_healthcheck())
-                print(message, file=sys.stdout if ok else sys.stderr)
-                sys.exit(0 if ok else 1)
+                # ok is True → healthy (exit 0). ok is False → broken (exit 1).
+                # ok is None → INCONCLUSIVE (exit 3): couldn't verify, NOT a false-OK.
+                print(message, file=sys.stdout if ok is True else sys.stderr)
+                sys.exit(0 if ok is True else (3 if ok is None else 1))
             except Exception as e:
                 print(f"Telegram MCP runtime healthcheck failed: {e}", file=sys.stderr)
                 sys.exit(1)
