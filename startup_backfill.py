@@ -222,7 +222,14 @@ async def _seed_recent(
         batch = []
         return True
 
-    async for msg in client.iter_messages(int(chat_id), limit=limit, reverse=True):
+    # Bug I2 (pr-hero-1u1): `reverse=True` at offset_id=0 walks from the OLDEST
+    # message → this seeded the FIRST `limit` messages (years old) and parked
+    # last_seen on an old id, so forward catch-up then crawled the whole history and
+    # fresh messages arrived hours/days late (SSOT acceptance «max(message_ts)<6h»
+    # broke). Default iter_messages (newest→oldest) seeds the LATEST `limit`; the
+    # first (newest) batch jumps the cursor to the true max, and older batches are
+    # GREATEST-no-ops (_update_chat_cursor_pg), so the cursor lands on the newest id.
+    async for msg in client.iter_messages(int(chat_id), limit=limit):
         batch.append(msg)
         seen += 1
         if len(batch) >= batch_size:

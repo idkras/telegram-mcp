@@ -119,7 +119,22 @@ async def main() -> int:
         return 1
 
     client = TelegramClient(StringSession(session_str), api_id, api_hash)
-    await client.start()
+    # Bug I1 (pr-hero-1u1): `client.start()` with no bot_token, on a revoked/dead
+    # session, drops into an INTERACTIVE input() asking for the phone number. Under
+    # launchd/cron stdin is empty → the process hangs FOREVER, launchd sees the job
+    # alive and never restarts it → ingest silently freezes for days (the lisa 9-day
+    # stall). connect() never prompts; is_user_authorized() tells us the truth. A dead
+    # session must EXIT non-zero (so the scheduler/monitor notices), never block on a tty.
+    await client.connect()
+    if not await client.is_user_authorized():
+        logger.error(
+            "Telegram session for profile '%s' is NOT authorized (revoked/dead). "
+            "Refusing interactive login under non-tty — exiting non-zero so the "
+            "monitor surfaces it instead of hanging on input().",
+            profile,
+        )
+        await client.disconnect()
+        return 1
 
     if args.keyword:
         result = await search_chats_by_keyword_impl(
@@ -144,6 +159,16 @@ async def main() -> int:
     total_written = 0
     processed = 0
 
+    # Bug I5 (pr-hero-1u1): the forward catch-up phase wrote NO runtime marker. If
+    # every chat silently failed (per-chat exceptions swallowed) the script still
+    # exited 0 and launchd saw success — a silent-fail window up to INGEST_STALE_HOURS.
+    # A boot heartbeat at the start proves «the cycle actually ran» to the doctor's
+    # ingest/monitor layers even if zero messages land this cycle.
+    try:
+        await writer.record_runtime_event(mode="catchup_boot", processed_chats=0)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("catchup_boot heartbeat failed: %s", exc)
+
     for chat in chats:
         chat_id = chat.get("id")
         if chat_id is None:
@@ -167,6 +192,16 @@ async def main() -> int:
                 "Progress: %d chats processed, %d messages written", processed, total_written
             )
         await asyncio.sleep(0.05)
+
+    # Bug I5 (pr-hero-1u1): completion heartbeat — records how many chats/messages the
+    # forward phase actually processed. max(message_ts) alone can't tell «cycle ran, no
+    # new messages» from «cycle never ran»; this marker makes the difference visible.
+    try:
+        await writer.record_runtime_event(
+            mode="catchup_heartbeat", processed_chats=processed, inserted_messages=total_written
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("catchup_heartbeat failed: %s", exc)
 
     # ── Stage-7 B1: bounded backward deep-backfill в ТОМ ЖЕ соединении ──
     # Принципиально: НЕ открываем второй TelegramClient. Используем тот же
