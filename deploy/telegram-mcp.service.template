@@ -1,0 +1,31 @@
+# systemd unit template for one Telegram MCP ingest listener (pr-hero-xf6).
+# Rendered per profile by deploy-sandbox-ik.sh → /etc/systemd/system/telegram-mcp-__PROFILE__.service
+# Naming telegram-mcp-<profile> matches telegram_mcp_doctor.check_deploy_units +
+# telegram_endpoints.py fetch_vps_endpoint (SwitchBar). One process per account =
+# one long-lived Telethon session per endpoint (§Telegram session-per-endpoint).
+[Unit]
+Description=Telegram MCP ingest listener (__PROFILE__) → Supabase
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__APP_DIR__
+# per-profile secrets (session string / TELEGRAM_USER / LABA_MODE) — NOT in git
+EnvironmentFile=/etc/telegram-mcp/env.d/__PROFILE__.env
+ExecStart=__APP_DIR__/.venv/bin/python main.py
+Restart=on-failure
+RestartSec=5
+# graceful shutdown: give Telethon time to flush + disconnect cleanly
+TimeoutStopSec=20
+KillSignal=SIGTERM
+# logs → journald (journalctl -u telegram-mcp-__PROFILE__), not /app/logs
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=telegram-mcp-__PROFILE__
+
+[Install]
+WantedBy=multi-user.target
