@@ -201,8 +201,10 @@ async def _seed_recent(
     from heroes_platform.heroes_telegram_mcp.supabase_writer import _resolve_chat_title
     chat_title = await _resolve_chat_title(client, chat_id)
 
+    seed_cursor_hwm = 0  # high-water-mark — cursor only ever advances (path-agnostic)
+
     async def _flush() -> bool:
-        nonlocal batch, written
+        nonlocal batch, written, seed_cursor_hwm
         if not batch:
             return True
         n = await writer.write_messages_batch(batch, chat_id, chat_type, chat_title)
@@ -217,8 +219,15 @@ async def _seed_recent(
             batch = []
             return False
         max_id = max(int(getattr(m, "id", 0) or 0) for m in batch)
-        if max_id > 0:
-            await writer.update_chat_cursor(chat_id, last_seen_message_id=max_id)
+        # Bug I2-REST (code+falsifier review pr-hero-1u1): with newest→oldest iteration
+        # each batch has a DECREASING max_id. _update_chat_cursor_pg guards with GREATEST,
+        # but the REST-only path (SUPABASE_TELEGRAM_USE_REST_ONLY=1) does a blind upsert
+        # WITHOUT GREATEST → later (older) batches would regress the cursor to an old id →
+        # forward catch-up re-fetches. Enforce monotonicity HERE (in-code high-water-mark)
+        # so the cursor is path-agnostic: only advance, never send a value below the hwm.
+        if max_id > seed_cursor_hwm:
+            seed_cursor_hwm = max_id
+            await writer.update_chat_cursor(chat_id, last_seen_message_id=seed_cursor_hwm)
         batch = []
         return True
 
@@ -226,9 +235,9 @@ async def _seed_recent(
     # message → this seeded the FIRST `limit` messages (years old) and parked
     # last_seen on an old id, so forward catch-up then crawled the whole history and
     # fresh messages arrived hours/days late (SSOT acceptance «max(message_ts)<6h»
-    # broke). Default iter_messages (newest→oldest) seeds the LATEST `limit`; the
-    # first (newest) batch jumps the cursor to the true max, and older batches are
-    # GREATEST-no-ops (_update_chat_cursor_pg), so the cursor lands on the newest id.
+    # broke). Default iter_messages (newest→oldest) seeds the LATEST `limit`; the first
+    # (newest) batch sets the high-water-mark to the true max, older batches are in-code
+    # no-ops (see _flush), so the cursor lands on the newest id on BOTH PG and REST paths.
     async for msg in client.iter_messages(int(chat_id), limit=limit):
         batch.append(msg)
         seen += 1

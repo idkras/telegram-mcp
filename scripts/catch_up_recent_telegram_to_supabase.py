@@ -125,7 +125,18 @@ async def main() -> int:
     # alive and never restarts it → ingest silently freezes for days (the lisa 9-day
     # stall). connect() never prompts; is_user_authorized() tells us the truth. A dead
     # session must EXIT non-zero (so the scheduler/monitor notices), never block on a tty.
-    await client.connect()
+    # I1-network (code+falsifier review): connect() itself can raise (DNS/sock/
+    # AuthKeyDuplicated) — catch it so we fail loud (return 1) instead of an uncaught
+    # crash, keeping the same «exit non-zero, never hang» contract on every path.
+    try:
+        await client.connect()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Telegram connect() failed for profile '%s': %s", profile, exc)
+        try:
+            await client.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+        return 1
     if not await client.is_user_authorized():
         logger.error(
             "Telegram session for profile '%s' is NOT authorized (revoked/dead). "
@@ -133,6 +144,16 @@ async def main() -> int:
             "monitor surfaces it instead of hanging on input().",
             profile,
         )
+        # I5-consumer: write an explicit RED marker so the exit-1 loop is VISIBLE to
+        # check_catchup_freshness, not just a silent absence of a fresh heartbeat.
+        try:
+            _dead_writer = SupabaseWriter(telegram_user_id=os.getenv("TELEGRAM_USER", "ikrasinsky"))
+            await _dead_writer.record_runtime_event(
+                mode="catchup_session_dead", processed_chats=0, inserted_messages=0,
+                error="session not authorized (revoked/dead)",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("catchup_session_dead marker failed: %s", exc)
         await client.disconnect()
         return 1
 
