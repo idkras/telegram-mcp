@@ -195,11 +195,17 @@ async def _seed_recent(
     seen = 0
     batch_size = int(getattr(writer, "batch_size", 100) or 100)
 
+    # security-1 (pr-hero-x0p): resolve title once so seed honours title/username
+    # skip — iter_messages below gives msg.chat=None, so the guardian would miss a
+    # code-relay chat not in id_tails on first seed without this.
+    from heroes_platform.heroes_telegram_mcp.supabase_writer import _resolve_chat_title
+    chat_title = await _resolve_chat_title(client, chat_id)
+
     async def _flush() -> None:
         nonlocal batch, written
         if not batch:
             return
-        n = await writer.write_messages_batch(batch, chat_id, chat_type)
+        n = await writer.write_messages_batch(batch, chat_id, chat_type, chat_title)
         written += n
         max_id = max(int(getattr(m, "id", 0) or 0) for m in batch)
         if max_id > 0:

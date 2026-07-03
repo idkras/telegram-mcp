@@ -252,6 +252,12 @@ async def deep_backfill_one_chat(
         result.completed = True
         return result
 
+    # security-1 (pr-hero-x0p): resolve title once so deep-backfill honours the
+    # title/username skip (iter_messages gives msg.chat=None). Closure _flush below
+    # captures chat_title from this scope.
+    from heroes_platform.heroes_telegram_mcp.supabase_writer import _resolve_chat_title
+    chat_title = await _resolve_chat_title(client, cid_int)
+
     floor = _resolve_floor(cursor)
     result.floor_before = floor
 
@@ -294,7 +300,7 @@ async def deep_backfill_one_chat(
             valid_ids = [
                 int(getattr(m, "id", 0) or 0) for m in batch if int(getattr(m, "id", 0) or 0) > 0
             ]
-            n = await writer.write_messages_batch(batch, cid_int, chat_type)
+            n = await writer.write_messages_batch(batch, cid_int, chat_type, chat_title)
             pass_state["written"] += n
             if valid_ids:
                 batch_min = min(valid_ids)
