@@ -89,6 +89,30 @@ class TestI5ForwardHeartbeat:
         assert "catchup_heartbeat" in src, "need a completion heartbeat (how much processed)"
 
 
+_INSTALLER = _ROOT / "scripts" / "install_deep_backfill_launchd.sh"
+
+
+# ---------------------------------------------------------------------------
+# M4 — deprecated launchd installer must not register a disabled /bin/echo stub
+# ---------------------------------------------------------------------------
+class TestM4LaunchdStub:
+    def test_installer_refuses_instead_of_registering_stub(self):
+        src = _INSTALLER.read_text()
+        # It must exit BEFORE the ACTUAL launchctl bootstrap COMMAND (not the mention
+        # of «launchctl bootstrap» in the header comment).
+        idx_exit = src.find("\nexit 2")
+        m = re.search(r'^\s*launchctl bootstrap ', src, re.MULTILINE)
+        assert idx_exit != -1, "installer must fail loudly (exit 2) with a redirect"
+        assert m is None or idx_exit < m.start(), (
+            "installer must exit BEFORE registering the disabled /bin/echo stub"
+        )
+
+    def test_installer_points_to_real_scheduler(self):
+        assert "periodic-catchup" in _INSTALLER.read_text(), (
+            "must redirect operator to the real scheduler, not silently no-op"
+        )
+
+
 if __name__ == "__main__":
     import pytest
     import sys
