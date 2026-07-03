@@ -155,6 +155,28 @@ def test_security1_bot_relay_resolve_via_username():
     assert title and "inbox" in title.lower()
 
 
+def test_security5_broken_yaml_fails_fast_at_init(monkeypatch):
+    """security-5: a corrupt guardian YAML must make SupabaseWriter.__init__ RAISE
+    (unit refuses to boot, visible) — not lazily die at first ingest then fail-closed
+    drop every message silently."""
+    import supabase_writer as _sw
+    _sw._GUARD_RULES = None  # reset cache
+    monkeypatch.setattr(_sw, "_guard_rules", lambda: (_ for _ in ()).throw(RuntimeError("corrupt YAML")))
+    monkeypatch.setattr(_sw, "_get_postgres_url", lambda: None)
+    import pytest
+    with pytest.raises(RuntimeError, match="refusing to start"):
+        _sw.SupabaseWriter(telegram_user_id="ikrasinsky")
+
+
+def test_security5_valid_yaml_boots(monkeypatch):
+    """Valid guardian YAML → __init__ succeeds (real load of telegram_index_blacklist.yaml)."""
+    import supabase_writer as _sw
+    _sw._GUARD_RULES = None
+    monkeypatch.setattr(_sw, "_get_postgres_url", lambda: None)
+    w = _sw.SupabaseWriter(telegram_user_id="ikrasinsky")  # loads real YAML, must not raise
+    assert w.telegram_user_id == "ikrasinsky"
+
+
 if __name__ == "__main__":
     import subprocess
     subprocess.run([sys.executable, "-m", "pytest", __file__, "-v"])

@@ -239,6 +239,21 @@ class SupabaseWriter:
         ):
             self._postgres_url = None
 
+        # security-5 fix (pr-hero-x0p): fail-fast on a broken guardian YAML at
+        # startup. A lazy load meant a corrupt telegram_index_blacklist.yaml would
+        # blow up only at first ingest → fail-closed then drops EVERY message
+        # silently (guardian dead, but the unit stays "active"). Loading here makes
+        # the unit refuse to boot → visible in journald + doctor deploy_units, so a
+        # bad deploy is caught immediately. Opt-out for tests: TELEGRAM_GUARD_LAZY=1.
+        if os.getenv("TELEGRAM_GUARD_LAZY", "").strip().lower() not in ("1", "true", "yes"):
+            try:
+                _guard_rules()
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    f"index guardian YAML failed to load ({exc}) — refusing to start; "
+                    "a broken guardian would fail-closed-drop every message silently"
+                ) from exc
+
     @property
     def client(self) -> Any:
         """Lazy-init Supabase client (only used when not using direct Postgres)."""
