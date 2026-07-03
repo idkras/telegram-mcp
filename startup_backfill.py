@@ -201,23 +201,35 @@ async def _seed_recent(
     from heroes_platform.heroes_telegram_mcp.supabase_writer import _resolve_chat_title
     chat_title = await _resolve_chat_title(client, chat_id)
 
-    async def _flush() -> None:
+    async def _flush() -> bool:
         nonlocal batch, written
         if not batch:
-            return
+            return True
         n = await writer.write_messages_batch(batch, chat_id, chat_type, chat_title)
         written += n
+        if n < len(batch):
+            logger.warning(
+                "Seed partial write for chat %s: wrote %d/%d; cursor not advanced for this batch",
+                chat_id,
+                n,
+                len(batch),
+            )
+            batch = []
+            return False
         max_id = max(int(getattr(m, "id", 0) or 0) for m in batch)
         if max_id > 0:
             await writer.update_chat_cursor(chat_id, last_seen_message_id=max_id)
         batch = []
+        return True
 
     async for msg in client.iter_messages(int(chat_id), limit=limit, reverse=True):
         batch.append(msg)
         seen += 1
         if len(batch) >= batch_size:
-            await _flush()
-    await _flush()
+            if not await _flush():
+                return written, True
+    if not await _flush():
+        return written, True
 
     return written, (seen >= limit > 0)
 
