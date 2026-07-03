@@ -116,6 +116,45 @@ def test_security3_raw_recursive_redact_no_card_anywhere():
     assert "4276 1234 5678 9010" not in (row["text"] or "")
 
 
+def test_security1_backfill_resolve_title_skips_relay():
+    """security-1: backfill iter_messages gives msg.chat=None → guardian would MISS
+    a relay chat not in id_tails. _resolve_chat_title fetches title via get_entity →
+    the "sms Inbox" chat is skipped even on backfill."""
+    import asyncio
+
+    class _FakeClient:
+        async def get_entity(self, cid):
+            return _Chat("sms Inbox")
+
+    title = asyncio.run(sw._resolve_chat_title(_FakeClient(), 999999003))
+    assert title == "sms Inbox"
+    w = _writer()
+    msg = _Msg("OTP 7788", mid=5)  # msg.chat is None (backfill shape)
+    assert msg.chat is None
+    assert w._telethon_message_to_row(msg, "999999003", "group", title) is None
+
+
+def test_security1_backfill_LEAK_without_resolve_negative_control():
+    """NEGATIVE CONTROL / regression proof: msg.chat=None + title=None (OLD backfill)
+    WOULD leak (row not None). If a refactor drops _resolve_chat_title, this catches it."""
+    w = _writer()
+    msg = _Msg("OTP 7788", mid=5)
+    row = w._telethon_message_to_row(msg, "999999003", "group", None)
+    assert row is not None  # leak reproduced when title unresolved → proves fix matters
+
+
+def test_security1_bot_relay_resolve_via_username():
+    """security-1 + security-4: OTP-bot (User, no .title) → resolve falls back to username."""
+    import asyncio
+
+    class _FakeClient:
+        async def get_entity(self, cid):
+            return _User(first_name=None, username="sms_gateway_bot inbox")
+
+    title = asyncio.run(sw._resolve_chat_title(_FakeClient(), 999999004))
+    assert title and "inbox" in title.lower()
+
+
 if __name__ == "__main__":
     import subprocess
     subprocess.run([sys.executable, "-m", "pytest", __file__, "-v"])
