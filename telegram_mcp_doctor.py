@@ -6,11 +6,15 @@ It does NOT catch «lisa ingest застряла 9 дн» (session alive but ing
 This doctor runs every mechanically-verifiable layer of telegram_mcp_workflow_ssot.yaml
 `lifecycle` and returns non-zero if ANY layer is red → feeds SwiftBar + STOP-flag.
 
-Layers checked (no Telegram login needed):
+Layers checked (7 of 8 lifecycle stages; provision_vps = external, covered transitively
+by deploy_units ssh). Verdict is 3-state: CLOSED (exit 0) / RED (exit 1) / INCONCLUSIVE
+(exit 3 — could not confirm a CRITICAL layer green). Critical layers (must be green for
+CLOSED): session_auth, session_collision, ingest, guardian_write.
   deploy_units       ssh systemctl is-active telegram-mcp-<profile>
-  session_collision  validate_session_per_endpoint.py exit 0
-  ingest             max(message_ts) per schema < INGEST_STALE_HOURS (catches 9d stall)
-  classify           classify_chats coverage == 100%
+  session_collision  validate_session_per_endpoint.py (INCONCLUSIVE on Linux ≠ green)
+  session_auth       session_health_monitor.py — revoked/duplicated key (transient ≠ RED)
+  ingest             max(message_ts) per schema < INGEST_STALE_HOURS; empty = INCONCLUSIVE
+  classify           classify_chats coverage >= CLASSIFY_COVERAGE_MIN (default 99%)
   guardian_write     0 code_relay (§types id_tails) messages in *.telegram_messages_raw
   monitor_surface    swiftbar cache generated_at < SWIFTBAR_STALE_MIN
 
@@ -107,21 +111,29 @@ def check_session_collision(s) -> dict:
         return {"layer": "session_collision", "ok": None, "detail": f"SKIP ({str(e)[:50]})"}
 
 
-def _ingest_stale(rows: dict, threshold: float) -> dict:
-    """Classify per-profile ingest staleness. Bug S5 (pr-hero-i5i): the old dict
-    comprehension called round(None) when a profile's telegram_messages_raw was
-    EMPTY (max(message_ts)=NULL → h=None) — that crash was swallowed into a SKIP,
-    masking «no messages at all» as «couldn't check». Empty table = NO ingest =
-    stale/RED, labelled 'no messages'; a number over threshold = stale with its
-    hours; fresh (≤ threshold) is dropped.
+def _ingest_stale(rows: dict, threshold: float):
+    """Classify per-profile ingest staleness into two distinct buckets.
+
+    Bug S5 (pr-hero-i5i): the old comprehension called round(None) when a profile's
+    telegram_messages_raw was EMPTY (max(message_ts)=NULL → h=None) — that crash was
+    swallowed into a SKIP, masking «no messages at all» as «couldn't check».
+
+    Calibration (design review pr-hero-i5i iter-2 — cold-start false-RED): an EMPTY
+    table is ambiguous — it can mean «ingest broke» OR «fresh/just-provisioned profile,
+    no messages yet». Flagging it RED would false-alarm the owner into an unnecessary
+    re-auth (which itself risks a session collision, RCA 2026-05-28). So:
+      • rows WITH data but older than threshold  → stale = definitely broken → RED
+      • EMPTY table (h is None)                  → empty = can't confirm flowing → INCONCLUSIVE
+    Returns (stale_dict, empty_list). The old masking-as-SKIP is gone either way.
     """
     stale: dict = {}
+    empty: list = []
     for prof, h in rows.items():
         if h is None:
-            stale[prof] = "no messages"
+            empty.append(prof)
         elif h > threshold:
             stale[prof] = round(h, 1)
-    return stale
+    return stale, empty
 
 
 def check_ingest(s) -> dict:
@@ -133,9 +145,15 @@ def check_ingest(s) -> dict:
             secs = cur.fetchone()[0]
             rows[prof] = (float(secs) / 3600.0) if secs is not None else None
         conn.close()
-        stale = _ingest_stale(rows, INGEST_STALE_H)
-        return {"layer": "ingest", "ok": not stale,
-                "detail": f"hours_since_last={ {p: (round(h,1) if h is not None else None) for p,h in rows.items()} } stale(>{INGEST_STALE_H}h or empty)={stale}"}
+        stale, empty = _ingest_stale(rows, INGEST_STALE_H)
+        hrs = f"hours_since_last={ {p: (round(h,1) if h is not None else None) for p,h in rows.items()} }"
+        if stale:  # rows exist but stale → definitely broken
+            return {"layer": "ingest", "ok": False,
+                    "detail": f"{hrs} STALE(>{INGEST_STALE_H}h)={stale}"}
+        if empty:  # no messages at all → can't confirm the channel flows (fresh OR dead)
+            return {"layer": "ingest", "ok": None,
+                    "detail": f"{hrs} INCONCLUSIVE — no messages ever for {empty} (fresh profile or ingest never ran)"}
+        return {"layer": "ingest", "ok": True, "detail": hrs}
     except Exception as e:  # noqa: BLE001
         return {"layer": "ingest", "ok": None, "detail": f"SKIP ({str(e)[:60]})"}
 
@@ -148,8 +166,14 @@ def check_classify(s) -> dict:
             import classify_chats  # type: ignore
         res = classify_chats.run(list(_schemas(s).values())[0])
         cov = classify_chats.coverage(res)
-        return {"layer": "classify", "ok": cov >= 100.0,
-                "detail": f"coverage={cov:.1f}% total={res['total']} unclassified={res['counts'].get('unclassified',0)}"}
+        # Calibration (code+design review pr-hero-i5i iter-2): a hard 100.0 gate makes
+        # classify chronically RED — ONE unclassified private chat (fallback type
+        # 'unclassified' is 'always'-match by design) drops coverage below 100 → RED →
+        # cry-wolf → owner adds `|| true`. Honest threshold is «near-complete», env-tunable,
+        # with the exact unclassified count surfaced so the remainder is actionable, not alarming.
+        min_cov = float(os.environ.get("CLASSIFY_COVERAGE_MIN", "99.0"))
+        return {"layer": "classify", "ok": cov >= min_cov,
+                "detail": f"coverage={cov:.1f}% (min {min_cov:.1f}%) total={res['total']} unclassified={res['counts'].get('unclassified',0)}"}
     except Exception as e:  # noqa: BLE001
         return {"layer": "classify", "ok": None, "detail": f"SKIP ({str(e)[:60]})"}
 
@@ -203,8 +227,19 @@ def _session_auth_probe(s) -> tuple[bool | None, str]:
         return None, f"SKIP (monitor could not run): {blob.strip().splitlines()[-1][:60] if blob.strip() else ''}"
     if r.returncode == 0:
         return True, "all probed profiles authorized (or NETWORK transient)"
-    dead = blob.strip().splitlines()[-1][:80] if blob.strip() else "exit %d" % r.returncode
-    return False, f"dead session(s): {dead}"
+    # Calibration (design review pr-hero-i5i iter-2 — transient false-RED → needless
+    # re-auth → session collision). A non-zero exit is only a real DEAD verdict if it is
+    # NOT a transient (network/timeout/flood). Those are INCONCLUSIVE, not RED. The deep
+    # retry (session_health_monitor itself must retry before declaring DEAD) is bug S11,
+    # owned by R3 pr-hero-3e1.1; here the doctor at least refuses to escalate a transient.
+    low = blob.lower()
+    transient = any(k in low for k in ("network", "timeout", "timed out", "floodwait",
+                                       "flood_wait", "connectionerror", "connection reset",
+                                       "temporarily", "unreachable"))
+    tail = blob.strip().splitlines()[-1][:80] if blob.strip() else "exit %d" % r.returncode
+    if transient:
+        return None, f"INCONCLUSIVE (transient, not a dead-key verdict): {tail}"
+    return False, f"dead session(s): {tail}"
 
 
 def check_session_auth(s) -> dict:
@@ -242,11 +277,20 @@ def main(argv: list[str]) -> int:
     results = run()
     red = [r for r in results if r["ok"] is False]
     green = [r for r in results if r["ok"] is True]
+    green_layers = {r["layer"] for r in green}
     # Bug S4 (pr-hero-i5i): the old verdict only counted RED (ok is False). If EVERY
     # layer SKIP-ped (ok=None) the doctor printed «contour closed» and exit 0 — a
-    # green-when-blind: we verified nothing yet claimed the contour was fine. All-SKIP
-    # (no green, no red) is INCONCLUSIVE and must exit non-zero, distinct from RED.
-    inconclusive = (not green) and (not red)
+    # green-when-blind: we verified nothing yet claimed the contour was fine.
+    #
+    # Bug S4-residual (adversarial falsifier pr-hero-i5i iter-2): the first fix only
+    # caught ALL-SKIP. But 1 trivial green (deploy_units = `systemctl is-active`, which
+    # says nothing about the session/data actually flowing) + critical layers SKIP still
+    # printed «contour closed» exit 0 — while the session could be revoked and ingest
+    # stuck 9 days. CLOSED must require EVERY critical layer proven green, not «≥1 green,
+    # 0 red». A critical layer that could not be checked (SKIP) = INCONCLUSIVE, not CLOSED.
+    CRITICAL_LAYERS = {"session_auth", "session_collision", "ingest", "guardian_write"}
+    critical_not_green = sorted(CRITICAL_LAYERS - green_layers)
+    inconclusive = bool(critical_not_green)
     if "--json" in argv:
         print(json.dumps({
             "results": results,
@@ -261,7 +305,8 @@ def main(argv: list[str]) -> int:
         if red:
             verdict = "🔴 CONTOUR OPEN — " + ",".join(r["layer"] for r in red)
         elif inconclusive:
-            verdict = "⚪ INCONCLUSIVE — не смог проверить ни один слой (all SKIP), contour NOT closed"
+            verdict = ("⚪ INCONCLUSIVE — критические слои не подтверждены зелёными: "
+                       + ",".join(critical_not_green) + " (contour NOT closed)")
         else:
             verdict = "✅ contour closed"
         print(f"\n  VERDICT: {verdict}")

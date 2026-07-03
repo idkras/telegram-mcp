@@ -60,24 +60,25 @@ class TestClassifyCoverage:
 # S5 — ingest: empty telegram_messages_raw (h is None) must be RED, not crash→SKIP
 # ---------------------------------------------------------------------------
 class TestIngestStale:
-    def test_none_hours_is_stale_no_messages(self):
-        # Empty raw table → max(message_ts)=NULL → h=None. round(None) crashed on
-        # baseline → except → SKIP → masked «no messages».
-        stale = doctor._ingest_stale({"ik": None}, threshold=6.0)
-        assert "ik" in stale, "empty table (h=None) must be flagged stale/red"
-        assert stale["ik"] == "no messages"
+    # iter-2 contract: _ingest_stale returns (stale_dict, empty_list). round(None) is
+    # gone. Empty table = INCONCLUSIVE (cold-start could be fresh), NOT a false RED;
+    # rows-with-old-data = definitely stale = RED. The old «empty→RED» was recalibrated
+    # after the design review (transient/cold-start false-RED → needless re-auth).
+    def test_none_hours_is_empty_not_stale(self):
+        stale, empty = doctor._ingest_stale({"ik": None}, threshold=6.0)
+        assert empty == ["ik"] and stale == {}, "empty table → INCONCLUSIVE bucket, not stale/RED"
 
     def test_number_over_threshold_is_stale(self):
-        stale = doctor._ingest_stale({"lisa": 220.0}, threshold=6.0)
-        assert "lisa" in stale
-        assert stale["lisa"] == 220.0
+        stale, empty = doctor._ingest_stale({"lisa": 220.0}, threshold=6.0)
+        assert stale == {"lisa": 220.0} and empty == []
 
     def test_fresh_is_not_stale(self):
-        assert doctor._ingest_stale({"ik": 1.2}, threshold=6.0) == {}
+        assert doctor._ingest_stale({"ik": 1.2}, threshold=6.0) == ({}, [])
 
-    def test_check_ingest_none_returns_ok_false(self, monkeypatch):
-        # end-to-end: empty table must make check_ingest return ok=False (RED),
-        # never ok=None (SKIP).
+    def test_check_ingest_empty_returns_inconclusive(self, monkeypatch):
+        # end-to-end: empty table → ok=None (INCONCLUSIVE), never a masked SKIP that
+        # LOOKS transient, and never a false RED. The verdict layer treats a critical
+        # layer at ok=None as «contour not proven closed» (exit 3), so it is still loud.
         class _Cur:
             def execute(self, *a, **k):
                 pass
@@ -95,7 +96,28 @@ class TestIngestStale:
         monkeypatch.setattr(doctor, "_pg", lambda: _Conn())
         monkeypatch.setattr(doctor, "_schemas", lambda s: {"ik": "rick_messages_tasks"})
         r = doctor.check_ingest({})
-        assert r["ok"] is False, f"empty raw table must be RED, got ok={r['ok']} detail={r['detail']}"
+        assert r["ok"] is None, f"empty raw table must be INCONCLUSIVE, got ok={r['ok']}"
+        assert "INCONCLUSIVE" in r["detail"]
+
+    def test_check_ingest_stale_rows_returns_red(self, monkeypatch):
+        class _Cur:
+            def execute(self, *a, **k):
+                pass
+
+            def fetchone(self):
+                return (240 * 3600.0,)  # 240h old → definitely stale
+
+        class _Conn:
+            def cursor(self):
+                return _Cur()
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(doctor, "_pg", lambda: _Conn())
+        monkeypatch.setattr(doctor, "_schemas", lambda s: {"ik": "rick_messages_tasks"})
+        r = doctor.check_ingest({})
+        assert r["ok"] is False, f"rows exist but 240h stale must be RED, got ok={r['ok']}"
 
 
 # ---------------------------------------------------------------------------
@@ -120,15 +142,37 @@ class TestVerdictAllSkip:
         )
         assert doctor.main(["--json"]) != 0
 
-    def test_at_least_one_green_no_red_exits_zero(self, monkeypatch):
+    def test_all_critical_green_no_red_exits_zero(self, monkeypatch):
+        # CLOSED requires EVERY critical layer proven green.
         monkeypatch.setattr(
             doctor, "run",
             lambda: [
-                {"layer": "a", "ok": True, "detail": "OK"},
-                {"layer": "b", "ok": None, "detail": "SKIP"},
+                {"layer": "session_auth", "ok": True, "detail": "OK"},
+                {"layer": "session_collision", "ok": True, "detail": "OK"},
+                {"layer": "ingest", "ok": True, "detail": "OK"},
+                {"layer": "guardian_write", "ok": True, "detail": "OK"},
+                {"layer": "monitor_surface", "ok": None, "detail": "SKIP"},
             ],
         )
         assert doctor.main([]) == 0
+
+    def test_trivial_green_but_critical_skip_is_inconclusive(self, monkeypatch):
+        # S4-residual (adversarial falsifier): 1 trivial green (deploy_units) +
+        # critical layers SKIP must NOT be «contour closed». Session could be revoked,
+        # ingest stuck 9 days. This is INCONCLUSIVE (exit 3), not exit 0.
+        monkeypatch.setattr(
+            doctor, "run",
+            lambda: [
+                {"layer": "deploy_units", "ok": True, "detail": "systemctl active"},
+                {"layer": "session_auth", "ok": None, "detail": "SKIP (no keychain)"},
+                {"layer": "ingest", "ok": None, "detail": "SKIP (no pg creds)"},
+                {"layer": "classify", "ok": None, "detail": "SKIP"},
+                {"layer": "guardian_write", "ok": None, "detail": "SKIP"},
+                {"layer": "session_collision", "ok": None, "detail": "SKIP"},
+            ],
+        )
+        rc = doctor.main([])
+        assert rc == 3, "trivial green + critical SKIP verified nothing about the channel — INCONCLUSIVE not CLOSED"
 
     def test_any_red_exits_nonzero(self, monkeypatch):
         monkeypatch.setattr(
@@ -359,6 +403,66 @@ class TestHealthcheckNonLaba:
         ok, _msg = asyncio.run(h.run_runtime_healthcheck(laba_mode=False, client=_Client()))
         # authorized session on local endpoint → healthy (True) is acceptable.
         assert ok is True
+
+
+class TestCalibrationIter2:
+    """Design+code review pr-hero-i5i iter-2: honest detectors must not false-RED
+    on cold-start / transient / near-complete-classify (cry-wolf → owner ignores)."""
+
+    def test_ingest_empty_is_inconclusive_not_red(self, monkeypatch):
+        # cold-start: a fresh profile with zero messages must NOT be RED (would
+        # false-alarm re-auth). It is INCONCLUSIVE (ok=None).
+        stale, empty = doctor._ingest_stale({"lisa": None}, 6.0)
+        assert stale == {} and empty == ["lisa"]
+
+    def test_ingest_rows_but_stale_is_red(self):
+        stale, empty = doctor._ingest_stale({"ik": 240.0}, 6.0)
+        assert stale == {"ik": 240.0} and empty == []
+
+    def test_ingest_empty_dict_no_profiles_not_green_falsely(self):
+        # _ingest_stale({}) must not silently claim green; empty rows = nothing checked.
+        stale, empty = doctor._ingest_stale({}, 6.0)
+        assert stale == {} and empty == []  # caller (check_ingest) treats no-rows via SKIP path
+
+    def test_classify_threshold_env_configurable(self, monkeypatch):
+        # 99.9% coverage (1 unclassified) must be green under default 99%, not RED.
+        monkeypatch.setattr(doctor, "_schemas", lambda s: {"ik": "rick_messages_tasks"})
+
+        class _CC:
+            @staticmethod
+            def run(sch):
+                return {"total": 1000, "counts": {"unclassified": 1}}
+            @staticmethod
+            def coverage(res):
+                return 99.9
+        monkeypatch.setitem(sys.modules, "classify_chats", _CC)
+        r = doctor.check_classify("ik")
+        assert r["ok"] is True, "99.9% must pass default 99% floor, not chronic-RED at 100%"
+
+    def test_session_auth_transient_is_inconclusive_not_red(self, monkeypatch):
+        # monitor exits non-zero due to a network timeout → INCONCLUSIVE, not a
+        # dead-key RED that would trigger needless re-auth.
+        monkeypatch.setattr(doctor, "_profiles", lambda s: ["ik"])
+
+        class _R:
+            returncode = 1
+            stdout = '{"status": "network", "reason": "connection timeout to DC"}'
+            stderr = ""
+        monkeypatch.setattr(doctor.subprocess, "run", lambda *a, **k: _R())
+        ok, detail = doctor._session_auth_probe({})
+        assert ok is None, "transient network failure must be INCONCLUSIVE, not RED"
+        assert "transient" in detail.lower()
+
+    def test_session_auth_real_dead_is_red(self, monkeypatch):
+        monkeypatch.setattr(doctor, "_profiles", lambda s: ["ik"])
+
+        class _R:
+            returncode = 1
+            stdout = "lisa: REVOKED — auth key invalidated"
+            stderr = ""
+        monkeypatch.setattr(doctor.subprocess, "run", lambda *a, **k: _R())
+        ok, detail = doctor._session_auth_probe({})
+        assert ok is False, "a genuine REVOKED must still be RED"
 
 
 if __name__ == "__main__":
