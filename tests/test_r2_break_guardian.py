@@ -177,6 +177,30 @@ def test_security5_valid_yaml_boots(monkeypatch):
     assert w.telegram_user_id == "ikrasinsky"
 
 
+def test_squad_i3_edited_message_raw_redacted_even_when_text_empty():
+    """squad I3: edited msg → text empty → categories empty → raw MUST still be redacted
+    (secret lives in raw.message/fwd_from). Fix: always _redact_raw_recursive when not skipped."""
+    w = _writer()
+    msg = _Msg("", chat_title="Karina", mid=9)  # text empty (edited-like)
+    msg.to_dict = lambda: {"id": 9, "message": "Uber 448193 do not share",
+                           "fwd_from": {"from_name": "Uber 448193 do not share"}}
+    row = w._telethon_message_to_row(msg, "78126134", "private", "Karina")
+    import json as _json
+    raw_str = _json.dumps(row["raw"], ensure_ascii=False)
+    assert "448193" not in raw_str  # edited-msg secret no longer leaks in raw
+
+
+def test_squad_bare_otp_short_masked_prose_intact():
+    """squad bare-OTP: short code-shaped msg masked; long prose numbers intact (no FP)."""
+    import index_guard as g
+    rules = g.load_rules()
+    assert "8241" not in g.redact_secrets("8241", rules)[0]
+    assert "448193" not in g.redact_secrets("Uber 448193 do not share", rules)[0]
+    prose = "я оплатил 5000 рублей за 3 товара в 2026 году по счёту 12345"
+    out = g.redact_secrets(prose, rules)[0]
+    assert "5000" in out and "2026" in out  # no false positive on prose
+
+
 if __name__ == "__main__":
     import subprocess
     subprocess.run([sys.executable, "-m", "pytest", __file__, "-v"])

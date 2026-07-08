@@ -72,5 +72,24 @@ def test_env_example_has_required_keys_and_no_secrets():
             assert line.strip() == "TELEGRAM_SESSION_STRING="  # empty, filled on VPS
 
 
+def test_rce_injection_via_profiles_refused():
+    """squad code-reviewer RCE: crafted --profiles must be REFUSED before any eval (no exec)."""
+    import os, tempfile
+    marker = os.path.join(tempfile.gettempdir(), "rce_pwn_marker_xf6")
+    if os.path.exists(marker): os.remove(marker)
+    r = subprocess.run(["bash", str(SCRIPT), "--dry-run", "--profiles", f"ik;touch {marker}"],
+                       capture_output=True, text=True)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "REFUSED" in (r.stdout + r.stderr)
+    assert not os.path.exists(marker)  # injection did NOT execute
+
+
+def test_rce_injection_via_appdir_env_refused():
+    import subprocess as sp
+    r = sp.run(["bash", str(SCRIPT), "--dry-run"], capture_output=True, text=True,
+               env={**__import__("os").environ, "TELEGRAM_MCP_APP_DIR": "/home/x;rm -rf ~"})
+    assert r.returncode == 2 and "REFUSED" in (r.stdout + r.stderr)
+
+
 if __name__ == "__main__":
     subprocess.run([sys.executable, "-m", "pytest", __file__, "-v"])

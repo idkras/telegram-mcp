@@ -28,6 +28,23 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# ── RCE guard (pr-hero-xf6, found by code-reviewer squad 2026-07-03) ──────────
+# run() below uses `eval` (needed for the `&&`/redirect command strings), so EVERY
+# value that gets interpolated into a run-string MUST be validated first — otherwise
+# a crafted --profiles / TELEGRAM_MCP_USER / TELEGRAM_MCP_APP_DIR (e.g. `x;rm -rf ~`
+# or a $(...) / backtick) executes under sudo. Validate the untrusted inputs to safe
+# shapes; after this, no interpolated var can carry shell metacharacters.
+_die() { echo "[deploy-sandbox-ik] REFUSED: $1" >&2; exit 2; }
+_valid_ident() { case "$1" in ''|*[!a-z0-9_]*) return 1 ;; *) return 0 ;; esac; }
+_valid_ident "$APP_USER" || _die "unsafe TELEGRAM_MCP_USER='$APP_USER' (allowed: a-z0-9_)"
+case "$APP_DIR"  in /*) : ;; *) _die "TELEGRAM_MCP_APP_DIR must be absolute: '$APP_DIR'" ;; esac
+case "$APP_DIR"  in *['`$();|&<>*?'\''"'\ ]*) _die "unsafe TELEGRAM_MCP_APP_DIR='$APP_DIR'" ;; esac
+case "$REPO_URL" in https://github.com/[A-Za-z0-9._/-]*.git) : ;; *) _die "unexpected TELEGRAM_MCP_REPO='$REPO_URL'" ;; esac
+IFS=',' read -r -a _PROF_CHECK <<< "$PROFILES"
+for _p in "${_PROF_CHECK[@]}"; do
+  _valid_ident "$_p" || _die "unsafe profile '$_p' in --profiles (allowed: a-z0-9_)"
+done
+
 run() { if [ "$DRY_RUN" = 1 ]; then echo "DRY: $*"; else eval "$@"; fi; }
 log() { echo "[deploy-sandbox-ik] $*"; }
 
