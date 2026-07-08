@@ -483,11 +483,15 @@ class SupabaseWriter:
                 logger.info("guardian skip chat %s: %s", chat_id, decision.reason)
                 return None
             if decision.categories:
-                # security-3 fix: mask the sensitive value everywhere — the visible
-                # text AND recursively every string in the raw JSONB (message/text/
-                # fwd_from/entities/reply_markup) so `SELECT raw->>'text'` can't leak.
                 text = decision.text
-                raw_data = _redact_raw_recursive(raw_data, guard, rules)
+            # security-3+I3 fix (edited-msg leak, security-reviewer squad 2026-07-03):
+            # ALWAYS redact the raw JSONB, not only when `text` had a hit. An edited
+            # message / media caption / poll can carry the secret in raw fields
+            # (raw.message, fwd_from, entities, reply_markup) while `text` is empty or
+            # None → decision.categories was empty → raw stayed unredacted → the OTP
+            # leaked via `SELECT raw->>'message'`. Scanning raw independently every
+            # time (chat not skipped) closes that path regardless of the text hit.
+            raw_data = _redact_raw_recursive(raw_data, guard, rules)
         except Exception as guard_exc:
             # security-2 fix: fail CLOSED — on ANY guard error skip the message
             # entirely (return None). The previous "re-check blacklist" path called

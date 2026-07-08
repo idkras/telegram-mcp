@@ -72,6 +72,9 @@ def is_blacklisted(chat_id: Any, title: str | None, rules: dict[str, Any]) -> tu
     return False, ""
 
 
+_BARE_CODE_RE = re.compile(r"(?<!\d)\d{4,8}(?!\d)")
+
+
 def redact_secrets(text: str | None, rules: dict[str, Any]) -> tuple[str, list[str]]:
     """Mask sensitive values (card / code / password / passport / snils). Keep message."""
     if not text:
@@ -82,6 +85,16 @@ def redact_secrets(text: str | None, rules: dict[str, Any]) -> tuple[str, list[s
         if rx.search(out):
             out = rx.sub(placeholder, out)
             hit.append(name)
+    # bare-OTP heuristic (security-reviewer squad 2026-07-03): a keyword-gated regex
+    # ("код 8241") misses a naked OTP ("8241", "8241 do not share"). Masking every
+    # 4-8 digit run would corrupt prose (prices/years/counts), so gate on message
+    # SHAPE: only when the whole (stripped) message is SHORT — i.e. it basically IS a
+    # code, not prose with an embedded number. Threshold configurable; 0 disables.
+    max_len = int(rules.get("bare_code_max_len", 40) or 0)
+    if max_len and len(out.strip()) <= max_len and _BARE_CODE_RE.search(out):
+        out = _BARE_CODE_RE.sub("[REDACTED-CODE]", out)
+        if "bare_otp" not in hit:
+            hit.append("bare_otp")
     return out, hit
 
 
