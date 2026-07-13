@@ -68,7 +68,14 @@ if [ ! -x "$APP_DIR/.venv/bin/python" ]; then
 fi
 log "install deps"
 run "'$APP_DIR/.venv/bin/pip' install -q --upgrade pip"
-run "'$APP_DIR/.venv/bin/pip' install -q telethon psycopg2-binary supabase pyyaml"
+run "'$APP_DIR/.venv/bin/pip' install -q -r '$APP_DIR/requirements.txt' -r '$APP_DIR/requirements-laba.txt'"
+
+# Standalone checkout compatibility. Runtime modules historically import through
+# heroes_platform.*, while this deploy intentionally clones telegram-mcp alone.
+# Install the small env-only adapter and expose this checkout as the package.
+run "mkdir -p '$APP_DIR/heroes_platform/shared'"
+run "cp -R '$APP_DIR/deploy/standalone/heroes_platform/.' '$APP_DIR/heroes_platform/'"
+run "test -e '$APP_DIR/heroes_platform/heroes_telegram_mcp' || ln -s .. '$APP_DIR/heroes_platform/heroes_telegram_mcp'"
 
 # 3. per-profile env skeleton (does NOT overwrite an existing filled env)
 run "sudo mkdir -p '$ENV_DIR'"
@@ -100,10 +107,17 @@ for p in "${PROF_ARR[@]}"; do
   fi
 done
 
+# Continuous resumable history walk. One template instance per profile; systemd
+# will not overlap a new run while the previous oneshot is still active.
+for name in telegram-mcp-backfill@.service telegram-mcp-backfill@.timer; do
+  run "sudo cp '$HERE/$name' '/etc/systemd/system/$name'"
+done
+
 # 5. enable + (re)start
 run "sudo systemctl daemon-reload"
 for p in "${PROF_ARR[@]}"; do
   run "sudo systemctl enable telegram-mcp-${p}.service"
+  run "sudo systemctl enable --now telegram-mcp-backfill@${p}.timer"
   # only start if env has a session string (else it would crash-loop pre-auth)
   if [ "$DRY_RUN" = 1 ]; then
     echo "DRY: start telegram-mcp-${p} if TELEGRAM_SESSION_STRING present"
