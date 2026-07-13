@@ -202,6 +202,12 @@ async def main() -> int:
         writer.schema,
     )
 
+    # Telethon needs access_hash values to resolve old users/channels by numeric
+    # id. A fresh VPS StringSession has none of the desktop entity cache, so warm
+    # it from the account's current dialogs before the backward walk.
+    dialogs = await client.get_dialogs(limit=None)
+    logger.info("Warmed Telegram entity cache from %d dialogs", len(dialogs))
+
     explicit_chats: list[tuple[str, str]] | None = None
     if args.chat_id:
         explicit_chats = []

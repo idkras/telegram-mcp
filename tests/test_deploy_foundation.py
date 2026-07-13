@@ -21,8 +21,9 @@ def test_unit_renders_valid_systemd():
     u = _render("ikrasinsky")
     for section in ("[Unit]", "[Service]", "[Install]"):
         assert section in u, section
-    assert "ExecStart=/home/idkras/telegram-mcp/.venv/bin/python main.py" in u
+    assert "ExecStart=/home/idkras/telegram-mcp/.venv/bin/python listener.py" in u
     assert "EnvironmentFile=/etc/telegram-mcp/env.d/ikrasinsky.env" in u
+    assert "Environment=PYTHONPATH=/home/idkras/telegram-mcp" in u
     assert "WantedBy=multi-user.target" in u
     assert "SyslogIdentifier=telegram-mcp-ikrasinsky" in u  # journald, not /app/logs
     assert "Restart=on-failure" in u
@@ -70,6 +71,37 @@ def test_env_example_has_required_keys_and_no_secrets():
     for line in ex.splitlines():
         if line.startswith("TELEGRAM_SESSION_STRING="):
             assert line.strip() == "TELEGRAM_SESSION_STRING="  # empty, filled on VPS
+
+
+def test_deploy_installs_declared_dependencies_and_standalone_adapter():
+    script = SCRIPT.read_text()
+    assert "-r '$APP_DIR/requirements.txt' -r '$APP_DIR/requirements-laba.txt'" in script
+    assert "deploy/standalone/heroes_platform" in script
+    adapter = DEPLOY / "standalone" / "heroes_platform" / "shared"
+    for name in ("import_setup.py", "credentials_wrapper.py", "logging_utils.py"):
+        assert (adapter / name).is_file(), name
+
+    assert "telegram-mcp-backfill@.service" in script
+    assert "telegram-mcp-backfill@${p}.timer" in script
+
+
+def test_listener_entrypoint_is_noninteractive_and_long_lived():
+    listener = (DEPLOY.parent / "listener.py").read_text()
+    assert "run_until_disconnected" in listener
+    assert "input(" not in listener
+    assert "getpass" not in listener
+
+
+def test_backfill_timer_is_bounded_and_resumable():
+    service = (DEPLOY / "telegram-mcp-backfill@.service").read_text()
+    timer = (DEPLOY / "telegram-mcp-backfill@.timer").read_text()
+    assert "--budget 1000" in service
+    assert "--profile %i" in service
+    assert "EnvironmentFile=/etc/telegram-mcp/env.d/%i.env" in service
+    assert "SuccessExitStatus=2" in service
+    assert "OnUnitActiveSec=5min" in timer
+    cli = (DEPLOY.parent / "scripts" / "deep_backfill_history.py").read_text()
+    assert "get_dialogs(limit=None)" in cli
 
 
 def test_rce_injection_via_profiles_refused():

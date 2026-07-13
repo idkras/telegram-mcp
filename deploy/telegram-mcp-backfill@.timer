@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Telegram MCP bounded history backfill every five minutes (%i)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30
+Persistent=true
+Unit=telegram-mcp-backfill@%i.service
+
+[Install]
+WantedBy=timers.target

@@ -16,7 +16,8 @@ User=__USER__
 WorkingDirectory=__APP_DIR__
 # per-profile secrets (session string / TELEGRAM_USER / LABA_MODE) — NOT in git
 EnvironmentFile=/etc/telegram-mcp/env.d/__PROFILE__.env
-ExecStart=__APP_DIR__/.venv/bin/python main.py
+Environment=PYTHONPATH=__APP_DIR__
+ExecStart=__APP_DIR__/.venv/bin/python listener.py
 Restart=on-failure
 RestartSec=5
 # graceful shutdown: give Telethon time to flush + disconnect cleanly
