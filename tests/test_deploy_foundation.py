@@ -98,7 +98,9 @@ def test_deploy_installs_declared_dependencies_and_standalone_adapter():
 def test_standalone_registry_declares_every_listener_secret_id_and_rejects_unknown() -> None:
     registry = DEPLOY / "standalone/heroes_harness/credentials_registry.yaml"
     document = yaml.safe_load(registry.read_text(encoding="utf-8"))
-    declared = {item["key"] for item in document["credentials"]}
+    assert document["profile"] == "telegram-mcp-standalone"
+    assert document["count"] == len(document["entries"])
+    declared = {item["id"] for item in document["entries"]}
     assert {
         "telegram_api_id",
         "telegram_api_hash",
@@ -106,19 +108,27 @@ def test_standalone_registry_declares_every_listener_secret_id_and_rejects_unkno
         "supabase_rick_db_url",
         "supabase_rick_api_key",
     } <= declared
-    aliases = {alias for item in document["credentials"] for alias in item.get("env_aliases", [])}
+    aliases = {alias for item in document["entries"] for alias in item.get("env_aliases", [])}
     assert {"SUPABASE_DB_URL", "SUPABASE_API_KEY"} <= aliases
     standalone = DEPLOY / "standalone"
     env = os.environ.copy()
     env["PYTHONPATH"] = str(standalone)
     env["HEROES_CREDENTIALS_REGISTRY"] = str(registry)
+    env["TELEGRAM_USER"] = "ikrasinsky"
+    env["TELEGRAM_API_ID"] = "12345"
+    env["TELEGRAM_API_HASH"] = "a" * 32
+    env["TELEGRAM_SESSION_STRING"] = "test-session"
     probe = subprocess.run(
         [
             sys.executable,
             "-c",
             "from heroes_platform.credentials import credentials_manager; "
+            "from heroes_platform.credentials.service_env import get_service_credentials; "
+            "known=get_service_credentials('telegram'); "
             "r=credentials_manager.get_credential('undeclared_partner_secret'); "
-            "raise SystemExit(0 if not r.success and r.source is None else 1)",
+            "raise SystemExit(0 if known['TELEGRAM_API_ID']=='12345' "
+            "and known['TELEGRAM_SESSION_STRING']=='test-session' "
+            "and not r.success and r.source is None else 1)",
         ],
         env=env,
         capture_output=True,

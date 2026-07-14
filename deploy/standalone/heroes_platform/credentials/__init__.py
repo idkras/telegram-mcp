@@ -31,10 +31,13 @@ class CredentialsManager:
         document = yaml.safe_load(path.read_text(encoding="utf-8"))
         if document.get("catalog_scope") != "partner_subset":
             raise RuntimeError("Standalone registry must declare catalog_scope: partner_subset")
+        entries = document.get("entries")
+        if not isinstance(entries, list) or document.get("count") != len(entries):
+            raise RuntimeError("Standalone registry count does not match entries")
         self._configs = {
-            item["key"]: item
-            for item in document.get("credentials", [])
-            if isinstance(item, dict) and isinstance(item.get("key"), str)
+            item["id"]: item
+            for item in entries
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
         }
         if not self._configs:
             raise RuntimeError("Standalone credential registry is empty")
@@ -59,4 +62,3 @@ class CredentialsManager:
 
 
 credentials_manager = CredentialsManager()
-
