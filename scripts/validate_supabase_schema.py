@@ -37,9 +37,6 @@ TABLE_NAME = "telegram_messages_raw"
 
 def get_postgres_url() -> str | None:
     """Postgres URL для прямого подключения (как apply_telegram_migration / laba/n8n)."""
-    url = os.getenv("SUPABASE_DB_URL")
-    if url:
-        return url
     try:
         result = credentials_manager.get_credential("supabase_rick_db_url")
         if result.success and result.value:

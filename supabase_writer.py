@@ -158,9 +158,6 @@ def _get_postgres_url() -> str | None:
     When set, SupabaseWriter uses direct Postgres instead of REST — avoids PGRST106
     for schema rick_messages_tasks (Exposed schemas not required).
     """
-    url = os.getenv("SUPABASE_DB_URL")
-    if url:
-        return url
     try:
         from heroes_platform.credentials import credentials_manager
 
@@ -183,26 +180,19 @@ def _get_supabase_client() -> Any:
     """
     from supabase import create_client  # type: ignore
 
-    # Try environment variable first (for laba deployment)
-    api_key = os.getenv("SUPABASE_API_KEY")
+    api_key = None
+    try:
+        from heroes_platform.credentials import credentials_manager
 
-    if not api_key:
-        # Fall back to Mac Keychain (for local development)
-        try:
-            from heroes_platform.credentials import (
-                credentials_manager,
-            )
-
-            result = credentials_manager.get_credential("supabase_rick_api_key")
-            if result.success and result.value:
-                api_key = result.value
-        except ImportError:
-            pass
+        result = credentials_manager.get_credential("supabase_rick_api_key")
+        if result.success and result.value:
+            api_key = result.value
+    except ImportError:
+        pass
 
     if not api_key:
         raise RuntimeError(
-            "Supabase API key not found. Set SUPABASE_API_KEY env var "
-            "or store 'supabase_rick_api_key' in Mac Keychain."
+            "Supabase API key not found through registry id 'supabase_rick_api_key'."
         )
 
     url = os.getenv("SUPABASE_URL", SUPABASE_URL)

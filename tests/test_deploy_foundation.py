@@ -2,9 +2,12 @@
 and idempotent BEFORE it runs on sandbox-ik. No live VPS needed — validates the
 unit render, script syntax, and dry-run determinism."""
 import re
+import os
 import subprocess
 import sys
 from pathlib import Path
+
+import yaml
 
 DEPLOY = Path(__file__).resolve().parents[1] / "deploy"
 TEMPLATE = DEPLOY / "telegram-mcp.service.template"
@@ -77,12 +80,52 @@ def test_deploy_installs_declared_dependencies_and_standalone_adapter():
     script = SCRIPT.read_text()
     assert "-r '$APP_DIR/requirements.txt' -r '$APP_DIR/requirements-laba.txt'" in script
     assert "deploy/standalone/heroes_platform" in script
-    adapter = DEPLOY / "standalone" / "heroes_platform" / "shared"
-    for name in ("import_setup.py", "credentials_wrapper.py", "logging_utils.py"):
-        assert (adapter / name).is_file(), name
+    standalone = DEPLOY / "standalone"
+    for rel in (
+        "heroes_harness/credentials_registry.yaml",
+        "heroes_platform/credentials/__init__.py",
+        "heroes_platform/credentials/service_env.py",
+        "heroes_platform/shared/import_setup.py",
+        "heroes_platform/shared/logging_utils.py",
+    ):
+        assert (standalone / rel).is_file(), rel
+    assert not (standalone / "heroes_platform/shared/credentials_wrapper.py").exists()
 
     assert "telegram-mcp-backfill@.service" in script
     assert "telegram-mcp-backfill@${p}.timer" in script
+
+
+def test_standalone_registry_declares_every_listener_secret_id_and_rejects_unknown() -> None:
+    registry = DEPLOY / "standalone/heroes_harness/credentials_registry.yaml"
+    document = yaml.safe_load(registry.read_text(encoding="utf-8"))
+    declared = {item["key"] for item in document["credentials"]}
+    assert {
+        "telegram_api_id",
+        "telegram_api_hash",
+        "telegram_session",
+        "supabase_rick_db_url",
+        "supabase_rick_api_key",
+    } <= declared
+    aliases = {alias for item in document["credentials"] for alias in item.get("env_aliases", [])}
+    assert {"SUPABASE_DB_URL", "SUPABASE_API_KEY"} <= aliases
+    standalone = DEPLOY / "standalone"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(standalone)
+    env["HEROES_CREDENTIALS_REGISTRY"] = str(registry)
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from heroes_platform.credentials import credentials_manager; "
+            "r=credentials_manager.get_credential('undeclared_partner_secret'); "
+            "raise SystemExit(0 if not r.success and r.source is None else 1)",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert probe.returncode == 0, probe.stderr
 
 
 def test_listener_entrypoint_is_noninteractive_and_long_lived():
