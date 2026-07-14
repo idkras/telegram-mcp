@@ -19,21 +19,18 @@ Telegram MCP Server предоставляет полный доступ к Tele
 pip install -r requirements.txt
 ```
 
-### 2. Настройка ключей в macOS Keychain
+### 2. Настройка ключей через credential registry
 
-#### Для профиля lisa:
-```bash
-security add-generic-password -s "lisa_tg_api_key" -a "lisa" -w "YOUR_API_ID"
-security add-generic-password -s "lisa_tg_app_hash" -a "lisa" -w "YOUR_API_HASH"
-security add-generic-password -s "lisa_tg_session" -a "lisa" -w "YOUR_SESSION_STRING"
-```
+#### Для профиля lisa
 
-#### Для профиля ik:
-```bash
-security add-generic-password -s "ik_tg_api_id" -a "ilyakrasinsky" -w "YOUR_API_ID"
-security add-generic-password -s "ik_tg_api_hash" -a "ilyakrasinsky" -w "YOUR_API_HASH"
-security add-generic-password -s "ik_tg_session" -a "ilyakrasinsky" -w "YOUR_SESSION_STRING"
-```
+Зарегистрируйте logical ids `lisa_tg_api_key`, `lisa_tg_app_hash`,
+`lisa_tg_session` через `heroes_platform.credentials`; backend выбирается
+метаданными registry.
+
+#### Для профиля ik
+
+Используйте logical ids `ik_tg_api_id`, `ik_tg_api_hash`, `ik_tg_session`;
+не обращайтесь к Keychain или Windows Credential Manager напрямую.
 
 ### 3. Тестирование
 ```bash
@@ -83,7 +80,7 @@ chat_info = await get_chat(chat_id)
     "telegram-mcp": {
       "command": "${workspaceFolder}/.venv/bin/python",
       "args": [
-        "${workspaceFolder}/heroes_platform/shared/credentials_wrapper.py",
+        "-m", "heroes_platform.credentials.service_env",
         "telegram",
         "${workspaceFolder}/.venv/bin/python",
         "${workspaceFolder}/heroes_platform/heroes_telegram_mcp/main.py"

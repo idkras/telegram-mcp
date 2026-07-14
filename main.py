@@ -93,7 +93,7 @@ from heroes_platform.shared.import_setup import enable
 enable(__file__)
 
 # ПОТОМ импортируем heroes_platform модули
-from heroes_platform.shared.credentials_wrapper import get_service_credentials
+from heroes_platform.credentials.service_env import get_service_credentials
 from heroes_platform.shared.logging_utils import add_rotating_file_handler
 
 # Honest CLI-probe helpers (pr-hero-i5i R2). Pure, dependency-free module next to
@@ -361,7 +361,7 @@ TELEGRAM_API_ID = int(credentials.get("TELEGRAM_API_ID", "0"))
 TELEGRAM_API_HASH = credentials.get("TELEGRAM_API_HASH")
 SESSION_STRING = credentials.get("TELEGRAM_SESSION_STRING")
 # Credentials retrieved - logging to stderr to avoid JSON-RPC interference
-print(f"✅ Credentials retrieved from credentials_wrapper", file=sys.stderr)
+print("✅ Credentials retrieved from canonical registry", file=sys.stderr)
 
 # Validate credentials
 if not TELEGRAM_API_HASH:
@@ -412,7 +412,7 @@ async def _get_client_for_profile(profile: str) -> TelegramClient:
             creds = _get_credentials_for_profile("lisa")
             if not creds or not creds.get("TELEGRAM_API_HASH"):
                 raise ValueError(
-                    "Lisa profile credentials not configured. Check Keychain and credentials_manager (lisa_tg_*)."
+                    "Lisa profile credentials not configured. Check registry logical ids lisa_tg_*."
                 )
             api_id = int(creds.get("TELEGRAM_API_ID", 0))
             session_str = creds.get("TELEGRAM_SESSION_STRING")

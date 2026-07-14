@@ -12,7 +12,7 @@ Architecture:
     - Logs ingest runs to telegram_ingest_runs with telegram_user_id scope
     - Dedup via unique index on (chat_id, message_id)
 
-Credentials: Mac Keychain via credentials_manager (supabase_rick_api_key)
+Credentials: registry-only API via heroes_platform.credentials (supabase_rick_api_key)
 Migration: 20250110000001_telegram_tdlib_tables.sql (must be applied first)
 """
 
@@ -162,7 +162,7 @@ def _get_postgres_url() -> str | None:
     if url:
         return url
     try:
-        from heroes_platform.shared.credentials_manager import credentials_manager
+        from heroes_platform.credentials import credentials_manager
 
         result = credentials_manager.get_credential("supabase_rick_db_url")
         if result.success and result.value:
@@ -189,7 +189,7 @@ def _get_supabase_client() -> Any:
     if not api_key:
         # Fall back to Mac Keychain (for local development)
         try:
-            from heroes_platform.shared.credentials_manager import (
+            from heroes_platform.credentials import (
                 credentials_manager,
             )
 
