@@ -131,6 +131,7 @@ def test_standalone_registry_declares_every_listener_secret_id_and_rejects_unkno
             "and not r.success and r.source is None else 1)",
         ],
         env=env,
+        cwd=standalone,
         capture_output=True,
         text=True,
         check=False,
