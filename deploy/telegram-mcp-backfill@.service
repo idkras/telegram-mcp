@@ -1,5 +1,5 @@
 [Unit]
-Description=Telegram MCP bounded history backfill (%i) → Supabase
+Description=Telegram MCP forward catch-up + bounded history backfill (%i) → Supabase
 After=network-online.target telegram-mcp-%i.service
 Wants=network-online.target
 
@@ -9,9 +9,6 @@ User=idkras
 WorkingDirectory=/home/idkras/telegram-mcp
 EnvironmentFile=/etc/telegram-mcp/env.d/%i.env
 Environment=PYTHONPATH=/home/idkras/telegram-mcp
-ExecStart=/home/idkras/telegram-mcp/.venv/bin/python scripts/deep_backfill_history.py --profile %i --budget 1000 --per-chat 250 --select-limit 50 --json
-# CLI exit 2 means partial progress (for example one inaccessible left channel),
-# not a daemon crash. The JSON/run marker keeps that degraded state observable.
-SuccessExitStatus=2
+ExecStart=/home/idkras/telegram-mcp/.venv/bin/python scripts/catch_up_recent_telegram_to_supabase.py --profile %i --limit-messages 5000 --deep-backfill-budget 1000 --deep-backfill-per-chat 250 --deep-backfill-select-limit 50
 TimeoutStartSec=20min
 Nice=10

@@ -95,10 +95,12 @@ def test_listener_entrypoint_is_noninteractive_and_long_lived():
 def test_backfill_timer_is_bounded_and_resumable():
     service = (DEPLOY / "telegram-mcp-backfill@.service").read_text()
     timer = (DEPLOY / "telegram-mcp-backfill@.timer").read_text()
-    assert "--budget 1000" in service
+    assert "catch_up_recent_telegram_to_supabase.py" in service
+    assert "--limit-messages 5000" in service
+    assert "--deep-backfill-budget 1000" in service
+    assert "--deep-backfill-per-chat 250" in service
     assert "--profile %i" in service
     assert "EnvironmentFile=/etc/telegram-mcp/env.d/%i.env" in service
-    assert "SuccessExitStatus=2" in service
     assert "OnUnitActiveSec=5min" in timer
     cli = (DEPLOY.parent / "scripts" / "deep_backfill_history.py").read_text()
     assert "get_dialogs(limit=None)" in cli
