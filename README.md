@@ -29,7 +29,8 @@ pip install -r requirements.txt
 
 #### Для профиля ik
 
-Используйте logical ids `ik_tg_api_id`, `ik_tg_api_hash`, `ik_tg_session`;
+Используйте зарегистрированные logical ids `telegram_api_id`, `telegram_api_hash`,
+`telegram_session` и, когда нужен номер, `telegram_phone`;
 не обращайтесь к Keychain или Windows Credential Manager напрямую.
 
 ### 3. Тестирование

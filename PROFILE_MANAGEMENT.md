@@ -32,13 +32,10 @@ No configuration needed - just use Telegram MCP commands and they will work with
 - `lisa_tg_phone` (service: lisa_tg_phone, account: lisa)
 
 ### **IK PROFILE (ikrasinsky):**
-- `ik_tg_api_id` (service: ik_tg_api_id, account: ilyakrasinsky) - ALTERNATIVE FORMAT
-- `ik_tg_api_hash` (service: ik_tg_api_hash, account: ilyakrasinsky) - ALTERNATIVE FORMAT
-- `ik_tg_session` (service: ik_tg_session, account: ilyakrasinsky) - ALTERNATIVE FORMAT
-- `ik_tg_phone` (service: ik_tg_phone, account: ilyakrasinsky) - ALTERNATIVE FORMAT
-- `telegram_api_id` (service: telegram_api_id, account: ilyakrasinsky) - DEFAULT FORMAT (fallback)
-- `telegram_api_hash` (service: telegram_api_hash, account: ilyakrasinsky) - DEFAULT FORMAT (fallback)
-- `telegram_session` (service: telegram_session, account: ilyakrasinsky) - DEFAULT FORMAT (fallback)
+- `telegram_api_id`, `telegram_api_hash`, `telegram_session`, `telegram_phone`
+- Physical account/target выбирается только из metadata canonical credential registry.
+- Перед добавлением нового profile сначала объявите все exact logical IDs в registry;
+  прямая запись в Keychain/Windows Credential Manager не является onboarding-flow.
 
 ### **RICK COPOSLLY LINKEDINHERO PROFILE:**
 - `rick_linkedinhero_api_id` (service: rick_linkedinhero_api_id, account: ilyakrasinsky)

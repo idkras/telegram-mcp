@@ -41,16 +41,16 @@ def test_lisa_keys_unchanged():
 
 def test_ikrasinsky_keys_unchanged():
     names = get_profile_credential_names("ikrasinsky")
-    assert names["api_id"] == "ik_tg_api_id"
-    assert names["api_hash"] == "ik_tg_api_hash"
-    assert names["session"] == "ik_tg_session"
-    assert names["phone"] == "ik_tg_phone"
+    assert names["api_id"] == "telegram_api_id"
+    assert names["api_hash"] == "telegram_api_hash"
+    assert names["session"] == "telegram_session"
+    assert names["phone"] == "telegram_phone"
 
 
 @pytest.mark.parametrize("alias", ["ik", "ilyakrasinsky", "IK", "IkRaSinSky"])
 def test_ikrasinsky_aliases_resolve_to_same(alias):
     """ik / ilyakrasinsky / регистр — все резолвятся в ikrasinsky-профиль."""
-    assert get_profile_credential_names(alias)["session"] == "ik_tg_session"
+    assert get_profile_credential_names(alias)["session"] == "telegram_session"
 
 
 def test_rick_coposlly_keys_unchanged():
@@ -72,15 +72,9 @@ def test_default_profile_keys_unchanged(profile):
 
 # ── Universal convention: НОВЫЙ клиент = zero code change ──
 
-def test_new_client_resolves_by_convention():
-    """Новый клиент 'acme' — без правки кода — даёт acme_tg_* имена.
-    Это и есть Generalization-first Q4 = YES."""
-    names = get_profile_credential_names("acme")
-    assert names["api_id"] == "acme_tg_api_id"
-    assert names["api_hash"] == "acme_tg_api_hash"
-    assert names["session"] == "acme_tg_session"
-    assert names["phone"] == "acme_tg_phone"
-    assert names["2fa_password"] == "acme_tg_2fa_password"
+def test_new_client_requires_registry_declaration():
+    with pytest.raises(ValueError, match="undeclared credential IDs"):
+        get_profile_credential_names("acme")
 
 
 @pytest.mark.parametrize(
@@ -93,14 +87,14 @@ def test_new_client_resolves_by_convention():
     ],
 )
 def test_new_client_slug_normalization(raw, slug):
-    """Дефисы / точки / пробелы / регистр → безопасный snake_case slug."""
-    assert get_profile_credential_names(raw)["session"] == f"{slug}_tg_session"
+    """Дефисы / точки / пробелы / регистр дают безопасный, но незарегистрированный slug."""
+    with pytest.raises(ValueError, match=f"{slug}_tg_session"):
+        get_profile_credential_names(raw)
 
 
 def test_convention_keys_are_complete():
-    """Convention-профиль обязан вернуть все 5 ключей (включая 2fa_password)."""
-    names = get_profile_credential_names("brandnew")
-    assert set(names) >= {"api_id", "api_hash", "session", "phone", "2fa_password"}
+    with pytest.raises(ValueError, match="brandnew_tg_2fa_password"):
+        get_profile_credential_names("brandnew")
 
 
 def test_returns_fresh_dict_each_call():
@@ -138,11 +132,9 @@ def test_override_source_table_not_mutated():
 
 
 def test_slug_collision_is_by_design():
-    """Три формы одного имени → один slug → одинаковые ключи (документируем by-design)."""
-    a = get_profile_credential_names("my-client")["session"]
-    b = get_profile_credential_names("my_client")["session"]
-    c = get_profile_credential_names("My Client")["session"]
-    assert a == b == c == "my_client_tg_session"
+    for profile in ("my-client", "my_client", "My Client"):
+        with pytest.raises(ValueError, match="my_client_tg_session"):
+            get_profile_credential_names(profile)
 
 
 def test_reserved_override_name_cannot_be_new_client():
@@ -151,4 +143,14 @@ def test_reserved_override_name_cannot_be_new_client():
     случайного переиспользования имени без миграции."""
     assert get_profile_credential_names("lisa")["session"] == "lisa_tg_session"
     # а вот 'lisa-skincare' (другое имя) уйдёт по конвенции — изоляция сохранена
-    assert get_profile_credential_names("lisa-skincare")["session"] == "lisa_skincare_tg_session"
+    with pytest.raises(ValueError, match="lisa_skincare_tg_session"):
+        get_profile_credential_names("lisa-skincare")
+
+
+def test_every_builtin_override_logical_id_is_in_canonical_registry():
+    from heroes_platform.heroes_telegram_mcp.session_manager import _PROFILE_OVERRIDES
+    from heroes_platform.credentials import CredentialsManager
+
+    registered = set(CredentialsManager()._configs)
+    generated = {name for fields in _PROFILE_OVERRIDES.values() for name in fields.values() if name}
+    assert generated <= registered

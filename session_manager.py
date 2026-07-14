@@ -53,12 +53,12 @@ def _sent_code_type_name(sent_code_type: object) -> str:
 #
 # Generalization-first gate (AGENTS.md): добавление НОВОГО клиента обязано быть
 # правкой config/Keychain, НЕ правкой Python-кода (Q4 = YES). Поэтому:
-#   1. Легаси-профили с исторически непоследовательными именами ключей
-#      (lisa: api_key/app_hash; ik: ik_tg_*; default: telegram_*) — в явной
-#      _PROFILE_OVERRIDES таблице, чтобы НЕ протухли существующие Keychain-записи.
+#   1. Профили с исторически непоследовательными именами logical IDs
+#      (lisa: api_key/app_hash; default/ik: telegram_*) — в явной
+#      _PROFILE_OVERRIDES таблице. Physical account/target задаёт registry.
 #   2. Любой НОВЫЙ профиль резолвится по конвенции {slug}_tg_{field} —
-#      zero code change. Новый клиент = просто записать ключи в Keychain
-#      по конвенции + указать TELEGRAM_USER=<имя>.
+#      zero code change, но только если все имена заранее объявлены в
+#      credentials_registry.yaml. Прямая запись в Keychain/Windows запрещена.
 
 _PROFILE_ALIASES: dict[str, str] = {
     "ilyakrasinsky": "ikrasinsky",
@@ -75,10 +75,10 @@ _PROFILE_OVERRIDES: dict[str, dict[str, Optional[str]]] = {
         "2fa_password": "lisa_tg_2fa_password",
     },
     "ikrasinsky": {
-        "api_id": "ik_tg_api_id",
-        "api_hash": "ik_tg_api_hash",
-        "session": "ik_tg_session",
-        "phone": "ik_tg_phone",
+        "api_id": "telegram_api_id",
+        "api_hash": "telegram_api_hash",
+        "session": "telegram_session",
+        "phone": "telegram_phone",
     },
     "rick-coposlly-linkedinhero": {
         "api_id": "rick_coposlly_linkedinhero_api_id",
@@ -123,7 +123,8 @@ def get_profile_credential_names(profile: str) -> dict[str, Optional[str]]:
     Args:
         profile: Profile/client name. Легаси (ikrasinsky/lisa/rick-coposlly-linkedinhero/
             default) резолвятся через _PROFILE_OVERRIDES (backward compatible);
-            любой новый клиент — по конвенции {slug}_tg_{field}.
+            новый клиент — по конвенции {slug}_tg_{field}, только после
+            объявления всех logical IDs в credentials registry.
 
     Returns:
         dict with credential names: api_id, api_hash, session, phone, 2fa_password.
@@ -151,13 +152,20 @@ def get_profile_credential_names(profile: str) -> dict[str, Optional[str]]:
             "Use a latin-alphanumeric profile name or add an explicit "
             "_PROFILE_OVERRIDES entry."
         )
-    return {
+    generated = {
         "api_id": f"{slug}_tg_api_id",
         "api_hash": f"{slug}_tg_api_hash",
         "session": f"{slug}_tg_session",
         "phone": f"{slug}_tg_phone",
         "2fa_password": f"{slug}_tg_2fa_password",
     }
+    missing = sorted(name for name in generated.values() if name not in credentials_manager._configs)
+    if missing:
+        raise ValueError(
+            "Telegram profile has undeclared credential IDs: " + ", ".join(missing)
+            + "; declare them in credentials_registry.yaml before use"
+        )
+    return generated
 
 
 async def create_telegram_session(
