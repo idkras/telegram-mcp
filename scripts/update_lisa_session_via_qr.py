@@ -24,7 +24,7 @@ from heroes_platform.heroes_telegram_mcp.session_manager import (  # type: ignor
     _mask_phone,
     get_profile_credential_names,
 )
-from heroes_platform.shared.credentials_manager import credentials_manager  # type: ignore
+from heroes_platform.credentials import credentials_manager  # type: ignore
 
 
 def _require_credential(key: str) -> str:
@@ -126,7 +126,7 @@ async def main() -> None:
                         raise RuntimeError(
                             "2FA password required, no Keychain entry, and stdin unavailable "
                             "(running in background?). Save password first:\n"
-                            "  security add-generic-password -s lisa_tg_2fa_password -a lisa -w '<PASSWORD>' -U"
+                            "  Store logical id lisa_tg_2fa_password through heroes_platform.credentials."
                         )
                 user = await client.sign_in(password=password)
                 print("INFO: 2FA password accepted, login complete.")

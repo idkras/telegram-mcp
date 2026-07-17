@@ -32,13 +32,10 @@ No configuration needed - just use Telegram MCP commands and they will work with
 - `lisa_tg_phone` (service: lisa_tg_phone, account: lisa)
 
 ### **IK PROFILE (ikrasinsky):**
-- `ik_tg_api_id` (service: ik_tg_api_id, account: ilyakrasinsky) - ALTERNATIVE FORMAT
-- `ik_tg_api_hash` (service: ik_tg_api_hash, account: ilyakrasinsky) - ALTERNATIVE FORMAT
-- `ik_tg_session` (service: ik_tg_session, account: ilyakrasinsky) - ALTERNATIVE FORMAT
-- `ik_tg_phone` (service: ik_tg_phone, account: ilyakrasinsky) - ALTERNATIVE FORMAT
-- `telegram_api_id` (service: telegram_api_id, account: ilyakrasinsky) - DEFAULT FORMAT (fallback)
-- `telegram_api_hash` (service: telegram_api_hash, account: ilyakrasinsky) - DEFAULT FORMAT (fallback)
-- `telegram_session` (service: telegram_session, account: ilyakrasinsky) - DEFAULT FORMAT (fallback)
+- `telegram_api_id`, `telegram_api_hash`, `telegram_session`, `telegram_phone`
+- Physical account/target выбирается только из metadata canonical credential registry.
+- Перед добавлением нового profile сначала объявите все exact logical IDs в registry;
+  прямая запись в Keychain/Windows Credential Manager не является onboarding-flow.
 
 ### **RICK COPOSLLY LINKEDINHERO PROFILE:**
 - `rick_linkedinhero_api_id` (service: rick_linkedinhero_api_id, account: ilyakrasinsky)
@@ -80,11 +77,10 @@ No configuration needed - just use Telegram MCP commands and they will work with
 grep "🔑 Using TELEGRAM_USER" logs/mcp_errors.log
 ```
 
-### **Check Keychain Keys:**
-```bash
-# List all telegram keys in keychain
-security dump-keychain | grep -i telegram
-```
+### **Check registered keys:**
+
+Проверяйте logical ids и доступность только через `heroes_platform.credentials`;
+не перечисляйте backend напрямую.
 
 ### **Test Profile Manually:**
 ```bash
@@ -158,12 +154,12 @@ grep -A 5 "telegram-mcp" .cursor/mcp.json | grep "TELEGRAM_USER" || echo "Using 
 - `heroes_platform/heroes_telegram_mcp/scripts/connect_rick_coposlly_linkedinhero.sh` - shell wrapper
 
 **📁 Configuration:**
-- `heroes_platform/shared/credentials_manager.py` - конфигурация всех credentials
-- `heroes_platform/shared/credentials_wrapper.py` - маппинг профилей на credential names
+- `heroes_harness/credentials_registry.yaml` - конфигурация logical ids и backends
+- `heroes_platform/credentials/service_env.py` - маппинг профилей на credential names
 
 **💡 How to Create Session for New Profile:**
-1. Add credential configs to `credentials_manager._setup_default_configs()`
-2. Add profile mapping to `credentials_wrapper.get_service_credentials()`
+1. Add credential metadata to `heroes_harness/credentials_registry.yaml`
+2. Add profile mapping to `heroes_platform.credentials.service_env.get_service_credentials()`
 3. Add credential names mapping to `session_manager.get_profile_credential_names()`
 4. Create script in `heroes_platform/heroes_telegram_mcp/scripts/` using `session_manager.create_telegram_session()`
 5. Update this documentation

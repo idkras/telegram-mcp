@@ -28,7 +28,7 @@ from heroes_platform.shared.import_setup import enable
 
 enable(__file__)
 
-from heroes_platform.shared.credentials_manager import credentials_manager
+from heroes_platform.credentials import credentials_manager
 
 # Import from heroes_telegram_mcp package (same repo)
 

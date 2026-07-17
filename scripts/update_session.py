@@ -6,8 +6,8 @@ Telegram Session Token Updater
 📚 CODEBASE REFERENCES:
 - heroes_platform/heroes_telegram_mcp/session_manager.py - универсальный модуль для создания сессий
 - heroes_platform/heroes_telegram_mcp/scripts/connect_rick_coposlly_linkedinhero.py - пример для другого профиля
-- heroes_platform/shared/credentials_manager.py - управление credentials
-- heroes_platform/shared/credentials_wrapper.py - маппинг профилей на credential names
+- heroes_platform/credentials/ - registry-only credential API
+- heroes_platform/credentials/service_env.py - маппинг профилей на credential names
 
 JTBD: Как пользователь, я хочу обновить telegram session token,
 чтобы telegram-mcp работал с полной функциональностью.
