@@ -1,0 +1,5 @@
+hash: c6aa27e53bbae8d930976384086700dda5246a625de439070be2fcdcaad67d0a
+ts: 1784745849.543394
+root: /Users/ilyakrasinsky/workspace/vscode.projects/heroes-rickai-workspace/heroes_platform/heroes_telegram_mcp/.worktrees/claude-tg-article-instant-view
+replays: 1
+reason: reason: falsification выполнена в чате — baseline 57 pre-existing fails идентичен с/без правки, 10/10 новых тестов зелёные; bd runtime сломан, тикет после починки bd
