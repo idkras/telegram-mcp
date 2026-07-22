@@ -571,40 +571,66 @@ class SupabaseWriter:
         """
         cur = conn.cursor()
         try:
-            for a in articles:
-                cur.execute(
-                    q,
-                    (
-                        a["chat_id"], a["message_id"], a.get("telegram_user_id"),
-                        a.get("message_ts"), a.get("url"), a.get("title"),
-                        a.get("description"), a.get("article_text"),
-                        a.get("has_page", False), a.get("has_page", False),
-                    ),
+            params = [
+                (
+                    a["chat_id"], a["message_id"], a.get("telegram_user_id"),
+                    a.get("message_ts"), a.get("url"), a.get("title"),
+                    a.get("description"), a.get("article_text"),
+                    a.get("has_page", False), a.get("has_page", False),
                 )
+                for a in articles
+            ]
+            try:
+                from psycopg2.extras import execute_batch  # type: ignore
+
+                execute_batch(cur, q, params, page_size=100)
+            except ImportError:
+                for row_params in params:
+                    cur.execute(q, row_params)
             conn.commit()
             return len(articles)
         except Exception as exc:  # noqa: BLE001
             conn.rollback()
-            logger.warning("telegram_articles upsert failed (%d rows): %s", len(articles), exc)
+            # Migration 20260722000001 применяется per-schema; на профиле без неё
+            # (tg_<slug>) глушим индекс на весь процесс вместо warning-шторма.
+            if "does not exist" in str(exc) and "telegram_articles" in str(exc):
+                self._articles_disabled = True
+                logger.warning(
+                    "%s.telegram_articles missing — article index disabled for "
+                    "this process; apply migration 20260722000001 to this schema",
+                    self.schema,
+                )
+            else:
+                logger.warning("telegram_articles upsert failed (%d rows): %s", len(articles), exc)
             return 0
         finally:
             cur.close()
 
     def _index_articles(self, conn: Any | None, rows: list[dict[str, Any]]) -> None:
-        """Best-effort индексация статей после успешной записи сообщений."""
-        articles = self._article_rows(rows)
-        if not articles:
+        """Best-effort индексация статей после успешной записи сообщений.
+
+        Только PG-путь: REST .upsert() делает replace всей строки и терял бы
+        merge-семантику (has_page OR, article_text CASE) — edited-message без
+        cached_page затирал бы добытое тело (review MAJOR-1). Без _postgres_url
+        индекс статей отключён (один warning на процесс).
+        """
+        if getattr(self, "_articles_disabled", False):
+            return
+        if conn is None:
+            if not getattr(self, "_articles_rest_warned", False):
+                self._articles_rest_warned = True
+                logger.warning(
+                    "telegram_articles index requires direct Postgres "
+                    "(SUPABASE_DB_URL); REST mode — article index disabled"
+                )
             return
         try:
-            if conn is not None:
-                self._upsert_articles_pg(conn, articles)
+            articles = self._article_rows(rows)
+            if not articles:
                 return
-            self._table(TABLE_ARTICLES).upsert(
-                [{k: v for k, v in a.items()} for a in articles],
-                on_conflict="chat_id,message_id",
-            ).execute()
-        except Exception as exc:  # noqa: BLE001 — REST-путь тоже fail-soft
-            logger.warning("telegram_articles REST upsert failed: %s", exc)
+            self._upsert_articles_pg(conn, articles)
+        except Exception as exc:  # noqa: BLE001 — индекс статей не должен ломать ingest
+            logger.warning("telegram_articles index failed: %s", exc)
 
     def _write_message_pg(self, conn: Any, row: dict[str, Any]) -> bool:
         """Single message upsert via direct Postgres."""

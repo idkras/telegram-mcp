@@ -28,6 +28,13 @@ from typing import Any
 logger = logging.getLogger(__name__)
 HEARTBEAT_INTERVAL_SECONDS = int(os.getenv("TELEGRAM_LISTENER_HEARTBEAT_SECONDS", "60"))
 
+try:
+    from heroes_platform.heroes_telegram_mcp.article_enrichment import (
+        enrich_message_with_page,
+    )
+except ImportError:  # плоский запуск с VPS (PYTHONPATH на пакет)
+    from article_enrichment import enrich_message_with_page  # type: ignore
+
 # Only import Supabase writer when actually used
 _writer: Any = None
 
@@ -71,12 +78,6 @@ async def _maybe_fetch_article(client: Any, message: Any) -> None:
     """
     if os.getenv("TELEGRAM_ARTICLE_FETCH", "1") != "1":
         return
-    try:
-        from heroes_platform.heroes_telegram_mcp.article_enrichment import (
-            enrich_message_with_page,
-        )
-    except ImportError:
-        from article_enrichment import enrich_message_with_page  # type: ignore
     try:
         await enrich_message_with_page(client, message)
     except Exception as exc:  # noqa: BLE001 — обогащение не должно ломать ingest

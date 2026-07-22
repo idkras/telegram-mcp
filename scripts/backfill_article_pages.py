@@ -289,6 +289,11 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
+    import re as _re
+
+    if not _re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", args.schema):
+        raise SystemExit(f"invalid --schema {args.schema!r}: expected [a-z_][a-z0-9_]*")
+
     started = time.time()
     conn = _connect(_postgres_url())
     try:

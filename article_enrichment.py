@@ -33,7 +33,9 @@ logger = logging.getLogger(__name__)
 
 # Живой fetch в realtime-обработчике не должен задерживать ingest: сеть/DC
 # Telegram может тупить, а NewMessage-хендлер держит очередь событий.
-FETCH_TIMEOUT_SECONDS = 15
+# 5s: fetch — best-effort, недобранное тело добьёт backfill; 15s в hot-path
+# event-handler'а задерживали write/cursor и под burst копили FloodWait (review MAJOR-3).
+FETCH_TIMEOUT_SECONDS = 5
 # FloodWait в realtime-пути не пересиживаем (сообщение уже пишется без тела
 # статьи; backfill доберёт позже). В backfill-скрипте порог выше.
 FLOOD_WAIT_MAX_SLEEP_REALTIME = 5
@@ -171,9 +173,16 @@ def _rich_text_to_str(node: Any) -> str:
     return ""
 
 
-def _block_to_lines(block: Any, out: list[str]) -> None:
-    """Достать читаемые строки из одного PageBlock* (рекурсивно)."""
-    if not isinstance(block, dict):
+_MAX_BLOCK_DEPTH = 32
+
+
+def _block_to_lines(block: Any, out: list[str], _depth: int = 0) -> None:
+    """Достать читаемые строки из одного PageBlock* (рекурсивно).
+
+    _depth-guard: TL-дерево ациклично, но испорченный вручную raw JSONB мог бы
+    дать цикл → RecursionError на весь батч.
+    """
+    if not isinstance(block, dict) or _depth > _MAX_BLOCK_DEPTH:
         return
     btype = block.get("_", "")
     if btype in _SKIP_BLOCK_TYPES:
@@ -202,7 +211,7 @@ def _block_to_lines(block: Any, out: list[str]) -> None:
                 if s:
                     out.append(s)
                 for sub in item.get("blocks") or []:
-                    _block_to_lines(sub, out)
+                    _block_to_lines(sub, out, _depth + 1)
             else:
                 s = _rich_text_to_str(item).strip()
                 if s:
@@ -222,10 +231,10 @@ def _block_to_lines(block: Any, out: list[str]) -> None:
     for sub_key in ("blocks", "cover", "page_blocks"):
         sub = block.get(sub_key)
         if isinstance(sub, dict):
-            _block_to_lines(sub, out)
+            _block_to_lines(sub, out, _depth + 1)
         elif isinstance(sub, list):
             for x in sub:
-                _block_to_lines(x, out)
+                _block_to_lines(x, out, _depth + 1)
 
 
 def extract_article_text(page: Any) -> str:
