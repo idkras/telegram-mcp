@@ -61,6 +61,28 @@ def _get_chat_type(chat: Any) -> str:
     return "unknown"
 
 
+async def _maybe_fetch_article(client: Any, message: Any) -> None:
+    """Дозапросить тело article/Instant View поста перед записью (fail-soft).
+
+    Telegram редко присылает cached_page вместе с сообщением (4.6% корпуса),
+    поэтому для webpage-постов без тела делаем GetWebPageRequest и прикладываем
+    Page к message — писатель сохранит его в raw + telegram_articles.
+    Kill-switch: TELEGRAM_ARTICLE_FETCH=0.
+    """
+    if os.getenv("TELEGRAM_ARTICLE_FETCH", "1") != "1":
+        return
+    try:
+        from heroes_platform.heroes_telegram_mcp.article_enrichment import (
+            enrich_message_with_page,
+        )
+    except ImportError:
+        from article_enrichment import enrich_message_with_page  # type: ignore
+    try:
+        await enrich_message_with_page(client, message)
+    except Exception as exc:  # noqa: BLE001 — обогащение не должно ломать ingest
+        logger.info("article enrichment failed: %s", exc)
+
+
 def register_event_handlers(client: Any) -> None:
     """Register Telethon event handlers for real-time message ingestion.
 
@@ -79,6 +101,7 @@ def register_event_handlers(client: Any) -> None:
         """Handle new messages in all chats -> write to Supabase."""
         try:
             message = event.message
+            await _maybe_fetch_article(client, message)
             chat = await event.get_chat()
             chat_id = event.chat_id or getattr(chat, "id", 0)
             chat_type = _get_chat_type(chat)
@@ -105,6 +128,7 @@ def register_event_handlers(client: Any) -> None:
         """Handle edited messages -> update in Supabase (upsert)."""
         try:
             message = event.message
+            await _maybe_fetch_article(client, message)
             chat = await event.get_chat()
             chat_id = event.chat_id or getattr(chat, "id", 0)
             chat_type = _get_chat_type(chat)

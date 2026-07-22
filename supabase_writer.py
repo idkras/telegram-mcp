@@ -146,6 +146,7 @@ def _schema_for_profile(profile: str) -> str:
 # берётся из self.schema (см. SupabaseWriter.__init__) — НЕ из этой константы.
 SUPABASE_SCHEMA = _schema_for_profile("ikrasinsky")
 TABLE_MESSAGES = "telegram_messages_raw"
+TABLE_ARTICLES = "telegram_articles"
 TABLE_CHATS = "telegram_chats"
 TABLE_CHAT_STATE = "telegram_chat_state"
 TABLE_RUNS = "telegram_ingest_runs"
@@ -515,6 +516,96 @@ class SupabaseWriter:
             "raw": raw_data,
         }
 
+    # ------------------------------------------------------------------
+    # Article / Instant View index (telegram_articles)
+    # ------------------------------------------------------------------
+
+    def _article_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Строки telegram_articles для webpage-постов из готовых message-rows.
+
+        Работает по row["raw"] ПОСЛЕ redaction (см. _telethon_message_to_row) —
+        текст статьи наследует маскирование секретов. Kill-switch:
+        TELEGRAM_ARTICLE_INDEX=0.
+        """
+        if os.getenv("TELEGRAM_ARTICLE_INDEX", "1") != "1":
+            return []
+        try:
+            from heroes_platform.heroes_telegram_mcp.article_enrichment import (
+                article_row_from_message_row,
+            )
+        except ImportError:
+            from article_enrichment import article_row_from_message_row  # type: ignore
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                article = article_row_from_message_row(row)
+            except Exception as exc:  # noqa: BLE001 — индекс статей не должен ломать ingest
+                logger.warning(
+                    "article extract failed for %s/%s: %s",
+                    row.get("chat_id"), row.get("message_id"), exc,
+                )
+                continue
+            if article is not None:
+                out.append(article)
+        return out
+
+    def _upsert_articles_pg(self, conn: Any, articles: list[dict[str, Any]]) -> int:
+        """Upsert строк статей via direct Postgres. Fail-soft: warning, не исключение."""
+        if not articles:
+            return 0
+        q = f"""
+        INSERT INTO {self.schema}.telegram_articles
+        (chat_id, message_id, telegram_user_id, message_ts, url, title,
+         description, article_text, has_page, fetched_at, updated_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s, CASE WHEN %s THEN now() END, now())
+        ON CONFLICT (chat_id, message_id) DO UPDATE SET
+          url=EXCLUDED.url, title=EXCLUDED.title, description=EXCLUDED.description,
+          message_ts=EXCLUDED.message_ts,
+          -- не затирать ранее добытое тело пустым (edited-message без re-fetch)
+          article_text=CASE WHEN EXCLUDED.article_text <> ''
+                            THEN EXCLUDED.article_text
+                            ELSE {self.schema}.telegram_articles.article_text END,
+          has_page={self.schema}.telegram_articles.has_page OR EXCLUDED.has_page,
+          fetched_at=COALESCE(EXCLUDED.fetched_at, {self.schema}.telegram_articles.fetched_at),
+          updated_at=now()
+        """
+        cur = conn.cursor()
+        try:
+            for a in articles:
+                cur.execute(
+                    q,
+                    (
+                        a["chat_id"], a["message_id"], a.get("telegram_user_id"),
+                        a.get("message_ts"), a.get("url"), a.get("title"),
+                        a.get("description"), a.get("article_text"),
+                        a.get("has_page", False), a.get("has_page", False),
+                    ),
+                )
+            conn.commit()
+            return len(articles)
+        except Exception as exc:  # noqa: BLE001
+            conn.rollback()
+            logger.warning("telegram_articles upsert failed (%d rows): %s", len(articles), exc)
+            return 0
+        finally:
+            cur.close()
+
+    def _index_articles(self, conn: Any | None, rows: list[dict[str, Any]]) -> None:
+        """Best-effort индексация статей после успешной записи сообщений."""
+        articles = self._article_rows(rows)
+        if not articles:
+            return
+        try:
+            if conn is not None:
+                self._upsert_articles_pg(conn, articles)
+                return
+            self._table(TABLE_ARTICLES).upsert(
+                [{k: v for k, v in a.items()} for a in articles],
+                on_conflict="chat_id,message_id",
+            ).execute()
+        except Exception as exc:  # noqa: BLE001 — REST-путь тоже fail-soft
+            logger.warning("telegram_articles REST upsert failed: %s", exc)
+
     def _write_message_pg(self, conn: Any, row: dict[str, Any]) -> bool:
         """Single message upsert via direct Postgres."""
         q = f"""
@@ -612,11 +703,15 @@ class SupabaseWriter:
                 return True
             if self._postgres_url:
                 with self._pg_conn() as conn:
-                    return self._write_message_pg(conn, row)
+                    ok = self._write_message_pg(conn, row)
+                    if ok:
+                        self._index_articles(conn, [row])
+                    return ok
             self._table(TABLE_MESSAGES).upsert(
                 row,
                 on_conflict="chat_id,message_id",
             ).execute()
+            self._index_articles(None, [row])
             return True
         except Exception as exc:
             logger.warning(
@@ -653,11 +748,15 @@ class SupabaseWriter:
         try:
             if self._postgres_url:
                 with self._pg_conn() as conn:
-                    return self._write_messages_batch_pg(conn, rows)
+                    written = self._write_messages_batch_pg(conn, rows)
+                    if written:
+                        self._index_articles(conn, rows)
+                    return written
             self._table(TABLE_MESSAGES).upsert(
                 rows,
                 on_conflict="chat_id,message_id",
             ).execute()
+            self._index_articles(None, rows)
             return len(rows)
         except Exception as exc:
             logger.warning(
