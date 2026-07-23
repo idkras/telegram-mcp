@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# DEPRECATED 2026-07-23: heroes-laba (159.223.129.246) мёртв (ping loss, port 22 timeout);
+# telegram-mcp живёт на sandbox-ik. Скрипт остановлен намеренно.
+echo "DEPRECATED: laba умер, используй deploy/deploy-sandbox-ik.sh (sandbox-ik)" >&2; exit 2
 # Deploy Telegram MCP Server to Laba
 # Standard: Rick.ai Laba Deployment Standard 5.18
 #
