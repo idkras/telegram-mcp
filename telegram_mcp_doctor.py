@@ -79,6 +79,33 @@ def _pg():
     return psycopg2.connect(url, connect_timeout=20)
 
 
+def check_vps_ssh(s) -> dict:
+    """Классифицированная достижимость VPS (RCA 2026-07-22: агент час искал живой
+    хост, попав на мёртвый heroes-laba; sandbox-ik при этом резал SSH до баннера,
+    а доктор не отличал «SSH сломан» от «юниты не активны»).
+
+    Классы: OK / PREBANNER_RESET (порт открыт, sshd рвёт до баннера — fail2ban /
+    MaxStartups / деградировавший sshd; чинится ТОЛЬКО через Hetzner Console) /
+    TIMEOUT (сеть/VPN/файрвол) / AUTH (ключи: ssh-add --apple-load-keychain) /
+    UNKNOWN. Первый чек в цепочке: при не-OK остальные ssh-слои ждать нечего.
+    """
+    ok, out = _ssh("echo ok")
+    if ok and out == "ok":
+        return {"layer": "vps_ssh", "ok": True, "detail": f"{VPS} reachable"}
+    low = out.lower()
+    if ("kex_exchange_identification" in low or "connection reset" in low
+            or "connection closed by" in low):
+        cls, hint = "PREBANNER_RESET", "Hetzner Console: fail2ban-client status sshd / MaxStartups / systemctl status ssh"
+    elif "timed out" in low or "timeout" in low:
+        cls, hint = "TIMEOUT", "сеть/VPN: проверь маршрут до 176.9.39.104; hostname из SSOT vps:"
+    elif "permission denied" in low or "publickey" in low:
+        cls, hint = "AUTH", "ssh-add --apple-load-keychain; ключи ik_id_rsa/idkras_ed25519"
+    else:
+        cls, hint = "UNKNOWN", "raw stderr ниже; НЕ ходи на heroes-laba (мёртв с 2026-07)"
+    return {"layer": "vps_ssh", "ok": False,
+            "detail": f"{cls}: {VPS} — {hint} | raw={out[:70]!r}"}
+
+
 def check_deploy_units(s) -> dict:
     profs = _profiles(s)
     units = " ".join(f"telegram-mcp-{p}" for p in profs)
@@ -308,7 +335,7 @@ def check_monitor_surface(s) -> dict:
         return {"layer": "monitor_surface", "ok": None, "detail": f"SKIP ({str(e)[:50]})"}
 
 
-CHECKS = [check_deploy_units, check_session_collision, check_session_auth,
+CHECKS = [check_vps_ssh, check_deploy_units, check_session_collision, check_session_auth,
           check_ingest, check_catchup_freshness, check_classify,
           check_guardian_write, check_monitor_surface]
 
