@@ -1141,17 +1141,44 @@ class SupabaseWriter:
     # ------------------------------------------------------------------
 
     def _start_ingest_run_pg(self, conn: Any, run_id: str, mode: str) -> None:
+        """Записать старт прогона; переживает схему без telegram_user_id.
+
+        RCA 2026-07-26: миграция 20260605000001 §A не была применена к
+        rick_messages_tasks (таблица принадлежит supabase_admin, у писателя нет
+        прав ALTER) → КАЖДЫЙ boot/heartbeat падал «column telegram_user_id does
+        not exist», ingest_runs пустая с апреля, мониторинг считал живой
+        листенер мёртвым. Пишем без скоуп-колонки, когда её нет: наблюдаемость
+        важнее полноты поля, а `bd`-скоуп восстановим после ALTER.
+        """
         now = datetime.now(tz=timezone.utc).isoformat()
+        scoped = (
+            f"INSERT INTO {self.schema}.telegram_ingest_runs "
+            "(run_id, telegram_user_id, mode, started_at, status) "
+            "VALUES (%s,%s,%s,%s,'running')"
+        )
+        legacy = (
+            f"INSERT INTO {self.schema}.telegram_ingest_runs "
+            "(run_id, mode, started_at, status) VALUES (%s,%s,%s,'running')"
+        )
         cur = conn.cursor()
         try:
-            cur.execute(
-                f"""
-                INSERT INTO {self.schema}.telegram_ingest_runs
-                (run_id, telegram_user_id, mode, started_at, status)
-                VALUES (%s,%s,%s,%s,'running')
-                """,
-                (run_id, self.telegram_user_id, mode, now),
-            )
+            if getattr(self, "_ingest_runs_unscoped", False):
+                cur.execute(legacy, (run_id, mode, now))
+            else:
+                try:
+                    cur.execute(scoped, (run_id, self.telegram_user_id, mode, now))
+                except Exception as exc:  # noqa: BLE001
+                    if "telegram_user_id" not in str(exc) or "does not exist" not in str(exc):
+                        raise
+                    conn.rollback()
+                    self._ingest_runs_unscoped = True
+                    logger.warning(
+                        "%s.telegram_ingest_runs has no telegram_user_id column — "
+                        "writing run markers unscoped; apply migration "
+                        "20260605000001 §A to restore per-profile scope",
+                        self.schema,
+                    )
+                    cur.execute(legacy, (run_id, mode, now))
             conn.commit()
         except Exception:
             conn.rollback()
