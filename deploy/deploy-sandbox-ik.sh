@@ -72,9 +72,11 @@ run "'$APP_DIR/.venv/bin/pip' install -q -r '$APP_DIR/requirements.txt' -r '$APP
 
 # Standalone checkout compatibility. Runtime modules historically import through
 # heroes_platform.*, while this deploy intentionally clones telegram-mcp alone.
-# Install the small env-only adapter and expose this checkout as the package.
+# Install the registry-backed partner runtime and expose this checkout as the package.
 run "mkdir -p '$APP_DIR/heroes_platform/shared'"
 run "cp -R '$APP_DIR/deploy/standalone/heroes_platform/.' '$APP_DIR/heroes_platform/'"
+run "mkdir -p '$APP_DIR/heroes_harness'"
+run "cp '$APP_DIR/deploy/standalone/heroes_harness/credentials_registry.yaml' '$APP_DIR/heroes_harness/credentials_registry.yaml'"
 run "test -e '$APP_DIR/heroes_platform/heroes_telegram_mcp' || ln -s .. '$APP_DIR/heroes_platform/heroes_telegram_mcp'"
 
 # 3. per-profile env skeleton (does NOT overwrite an existing filled env)

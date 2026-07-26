@@ -26,7 +26,7 @@ from heroes_platform.shared.import_setup import enable  # noqa: E402
 
 enable(__file__)
 
-from heroes_platform.shared.credentials_wrapper import (  # noqa: E402
+from heroes_platform.credentials.service_env import (  # noqa: E402
     get_service_credentials,
 )
 from heroes_platform.heroes_telegram_mcp.startup_backfill import (  # noqa: E402

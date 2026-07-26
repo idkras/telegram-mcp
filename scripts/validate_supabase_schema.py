@@ -17,14 +17,14 @@ import sys
 from pathlib import Path
 from typing import Any, Dict
 
-# Добавляем путь для импорта credentials_manager
+# Добавляем workspace root для импорта registry-only credentials API.
 script_dir = Path(__file__).parent.parent.parent.parent
 shared_path = script_dir / "heroes_platform" / "shared"
 if shared_path.exists():
     sys.path.insert(0, str(shared_path))
 
 try:
-    from credentials_manager import credentials_manager
+    from heroes_platform.credentials import credentials_manager
     from supabase import create_client, Client
 except ImportError as e:
     print(f"❌ Ошибка импорта: {e}")
@@ -37,9 +37,6 @@ TABLE_NAME = "telegram_messages_raw"
 
 def get_postgres_url() -> str | None:
     """Postgres URL для прямого подключения (как apply_telegram_migration / laba/n8n)."""
-    url = os.getenv("SUPABASE_DB_URL")
-    if url:
-        return url
     try:
         result = credentials_manager.get_credential("supabase_rick_db_url")
         if result.success and result.value:

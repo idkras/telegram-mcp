@@ -17,6 +17,7 @@ WorkingDirectory=__APP_DIR__
 # per-profile secrets (session string / TELEGRAM_USER / LABA_MODE) — NOT in git
 EnvironmentFile=/etc/telegram-mcp/env.d/__PROFILE__.env
 Environment=PYTHONPATH=__APP_DIR__
+Environment=HEROES_CREDENTIALS_REGISTRY=__APP_DIR__/heroes_harness/credentials_registry.yaml
 ExecStart=__APP_DIR__/.venv/bin/python listener.py
 Restart=on-failure
 RestartSec=5

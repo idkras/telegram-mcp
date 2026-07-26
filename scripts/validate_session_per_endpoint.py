@@ -34,9 +34,10 @@ import argparse
 import hashlib
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
+
+from heroes_platform.credentials import credentials_manager
 
 ACK_ENV = "TG_SESSION_REUSE_ACK"
 ACK_MIN = 12
@@ -71,11 +72,10 @@ def _sha(value: str) -> str:
 
 
 def enumerate_keychain_sessions() -> dict[str, str] | None:
-    """Все Keychain `*_tg_session` / `telegram_session` → {account: sha256}.
+    """Все registry-declared Telegram sessions → {credential_id: sha256}.
 
-    Имена ключей берутся динамически из `security dump-keychain` (только svce),
-    значения — через `security find-generic-password -w`. Секрет не возвращается,
-    только sha256.
+    Имена берутся из уже загруженного canonical registry, значения — только через
+    его resolver. Секрет не возвращается, только sha256.
 
     Возврат (D1/H2 fix, design+code reviewer 2026-05-28 — НИКОГДА silent false-green):
       - dict  — `security` отработал, перечислены 0+ локальных сессий (пустой dict =
@@ -87,39 +87,13 @@ def enumerate_keychain_sessions() -> dict[str, str] | None:
     ЛОКАЛЬНОЙ машине (где живут local-сессии) ПЕРЕД отгрузкой .env.laba.
     """
     out: dict[str, str] = {}
-    try:
-        dump = subprocess.run(
-            ["security", "dump-keychain"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None  # couldn't enumerate — INCONCLUSIVE, not "0 sessions"
-    # Известное ограничение (C1, code-reviewer 2026-05-28): `find-generic-password
-    # -s NAME -w` возвращает значение ТОЛЬКО первого item при дублях service name
-    # (login + iCloud keychain). Если у аккаунта два item с одним svce, реальная
-    # коллизионная пара может быть во втором → false-negative. Перечисление всех
-    # значений per service требует `dump-keychain -d` (запрашивает пароль) —
-    # неприемлемо в CI/deploy preflight. Мера: runtime session_health_monitor.py
-    # ловит реальную смерть ключа независимо от этого статического сравнения.
-    names: set[str] = set()
-    for m in re.finditer(r'"svce"<blob>="([^"]*)"', dump):
-        name = m.group(1)
-        if _SESSION_KEY_RE.match(name):
-            names.add(name)
-    for name in sorted(names):
-        try:
-            val = subprocess.run(
-                ["security", "find-generic-password", "-s", name, "-w"],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            ).stdout.strip()
-        except (OSError, subprocess.SubprocessError):
+    configs = getattr(credentials_manager._resolve(), "_configs", {})
+    for name in sorted(configs):
+        if not _SESSION_KEY_RE.match(name):
             continue
-        if val:
-            out[name] = _sha(val)
+        result = credentials_manager.get_credential(name)
+        if result.success and result.value:
+            out[name] = _sha(result.value)
     return out
 
 
@@ -183,7 +157,7 @@ STRICT_ENV = "TG_SESSION_GUARD_STRICT"
 INCONCLUSIVE = """\
 session-per-endpoint: INCONCLUSIVE — нельзя перечислить локальные сессии на этом хосте.
 
-`security` (macOS Keychain) недоступен → сравнить laba-сессию (.env.laba, sha {env8})
+Credential registry недоступен → сравнить laba-сессию (.env.laba, sha {env8})
 не с чем. Это НЕ значит «коллизий нет» — это значит проверка здесь бессильна (laba —
 Linux-хост, у него нет local Keychain; он и есть «другой endpoint»).
 

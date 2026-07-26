@@ -40,7 +40,7 @@ from heroes_platform.shared.import_setup import enable
 
 enable(__file__)
 
-from heroes_platform.shared.credentials_wrapper import get_service_credentials
+from heroes_platform.credentials.service_env import get_service_credentials
 from heroes_platform.heroes_telegram_mcp.chat_search_utils import (
     get_all_chats_list_impl,
     search_chats_by_keyword_impl,
