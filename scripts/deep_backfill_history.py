@@ -148,6 +148,15 @@ async def main() -> int:
         help="Max chats to select from DB by priority (default 500)",
     )
     parser.add_argument(
+        "--entity-cache-dialog-limit",
+        type=int,
+        default=200,
+        help=(
+            "Max recent dialogs used to warm Telethon access hashes "
+            "(default 200; bounded to keep scheduled runs below systemd timeout)"
+        ),
+    )
+    parser.add_argument(
         "--list-only",
         action="store_true",
         help="Print chats that WOULD be processed and exit (no Telegram calls).",
@@ -202,10 +211,11 @@ async def main() -> int:
         writer.schema,
     )
 
-    # Telethon needs access_hash values to resolve old users/channels by numeric
-    # id. A fresh VPS StringSession has none of the desktop entity cache, so warm
-    # it from the account's current dialogs before the backward walk.
-    dialogs = await client.get_dialogs(limit=None)
+    # Telethon needs access_hash values to resolve numeric ids. Keep this warm-up
+    # bounded: accounts with thousands of dialogs otherwise spend the entire
+    # systemd timeout in Telegram flood waits before backfill starts.
+    entity_cache_limit = max(1, min(args.entity_cache_dialog_limit, 1000))
+    dialogs = await client.get_dialogs(limit=entity_cache_limit)
     logger.info("Warmed Telegram entity cache from %d dialogs", len(dialogs))
 
     explicit_chats: list[tuple[str, str]] | None = None

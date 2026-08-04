@@ -155,7 +155,9 @@ def test_backfill_timer_is_bounded_and_resumable():
     assert "SuccessExitStatus=2" in service
     assert "OnUnitActiveSec=5min" in timer
     cli = (DEPLOY.parent / "scripts" / "deep_backfill_history.py").read_text()
-    assert "get_dialogs(limit=None)" in cli
+    assert "get_dialogs(limit=entity_cache_limit)" in cli
+    assert "--entity-cache-dialog-limit 200" in service
+    assert "HEROES_CREDENTIALS_REGISTRY=/home/idkras/telegram-mcp/heroes_harness/credentials_registry.yaml" in service
 
 
 def test_rce_injection_via_profiles_refused():
