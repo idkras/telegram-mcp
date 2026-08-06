@@ -11,6 +11,10 @@ Usage:
   python -m heroes_platform.heroes_telegram_mcp.scripts.supabase_chats_by_client vipavenue-ru --table telegram_chats
 
 Output: JSON with chats[] and optionally messages_by_chat{}.
+
+Runtime scope: monorepo-only. This helper depends on
+``heroes_platform.rickai_mcp.supabase_postgres`` and is not a standalone
+telegram-mcp deploy entrypoint.
 """
 
 from __future__ import annotations
@@ -29,6 +33,9 @@ sys.path.insert(0, str(workspace_root))
 from heroes_platform.shared.import_setup import enable
 
 enable(__file__)
+
+
+RUNTIME_SCOPE = "monorepo-only"
 
 
 def _search_key_from_alias(alias: str) -> str:
@@ -61,8 +68,17 @@ def _message_chat_ids(chats: list[dict]) -> list[str]:
         if not chat_id:
             continue
         ids.append(chat_id)
-        if chat.get("chat_type") == "supergroup" and chat_id.isdigit():
-            ids.append(f"-100{chat_id}")
+        if chat.get("chat_type") == "supergroup":
+            if chat_id.startswith("-100") and chat_id[4:].isdigit():
+                peer_id = chat_id
+            elif chat_id.startswith("-") and chat_id[1:].isdigit():
+                peer_id = f"-100{chat_id[1:]}"
+            elif chat_id.isdigit():
+                peer_id = f"-100{chat_id}"
+            else:
+                peer_id = ""
+            if peer_id:
+                ids.append(peer_id)
     return list(dict.fromkeys(ids))
 
 

@@ -1,3 +1,5 @@
+> ⚠️ DEPRECATED 2026-07-23: laba (159.223.129.246) мёртв; актуальный деплой — deploy/deploy-sandbox-ik.sh на sandbox-ik. Файл сохранён как исторический RCA.
+
 # Deploy Telegram MCP to laba — clean checklist (session-per-endpoint safe)
 
 RCA 2026-05-28 «токен Лизы опять протух» → корень: одна StringSession

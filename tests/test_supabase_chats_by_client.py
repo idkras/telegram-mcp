@@ -6,6 +6,10 @@ from datetime import datetime, timezone
 from heroes_platform.heroes_telegram_mcp.scripts import supabase_chats_by_client as subject
 
 
+def test_helper_is_explicitly_monorepo_only() -> None:
+    assert subject.RUNTIME_SCOPE == "monorepo-only"
+
+
 def test_search_key_ignores_domain_and_title_separators() -> None:
     assert subject._search_key_from_alias("fizikl-org") == "fiziklorg"
     assert subject._search_key_from_alias("VIPAvenue-ru") == "vipavenue"
@@ -67,6 +71,8 @@ def test_postgres_timestamp_serializes_as_iso8601() -> None:
 def test_message_ids_include_telegram_supergroup_peer_form() -> None:
     chats = [
         {"chat_id": "3702464665", "chat_type": "supergroup"},
+        {"chat_id": "-3702464665", "chat_type": "supergroup"},
+        {"chat_id": "5421923777", "chat_type": "group"},
         {"chat_id": "5421923777", "chat_type": "group"},
         {"chat_id": "-1002569706168", "chat_type": "supergroup"},
     ]
@@ -74,6 +80,8 @@ def test_message_ids_include_telegram_supergroup_peer_form() -> None:
     assert subject._message_chat_ids(chats) == [
         "3702464665",
         "-1003702464665",
+        "-3702464665",
         "5421923777",
         "-1002569706168",
     ]
+    assert "-100-3702464665" not in subject._message_chat_ids(chats)

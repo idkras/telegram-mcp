@@ -146,6 +146,7 @@ def _schema_for_profile(profile: str) -> str:
 # берётся из self.schema (см. SupabaseWriter.__init__) — НЕ из этой константы.
 SUPABASE_SCHEMA = _schema_for_profile("ikrasinsky")
 TABLE_MESSAGES = "telegram_messages_raw"
+TABLE_ARTICLES = "telegram_articles"
 TABLE_CHATS = "telegram_chats"
 TABLE_CHAT_STATE = "telegram_chat_state"
 TABLE_RUNS = "telegram_ingest_runs"
@@ -510,6 +511,122 @@ class SupabaseWriter:
             "raw": raw_data,
         }
 
+    # ------------------------------------------------------------------
+    # Article / Instant View index (telegram_articles)
+    # ------------------------------------------------------------------
+
+    def _article_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Строки telegram_articles для webpage-постов из готовых message-rows.
+
+        Работает по row["raw"] ПОСЛЕ redaction (см. _telethon_message_to_row) —
+        текст статьи наследует маскирование секретов. Kill-switch:
+        TELEGRAM_ARTICLE_INDEX=0.
+        """
+        if os.getenv("TELEGRAM_ARTICLE_INDEX", "1") != "1":
+            return []
+        try:
+            from heroes_platform.heroes_telegram_mcp.article_enrichment import (
+                article_row_from_message_row,
+            )
+        except ImportError:
+            from article_enrichment import article_row_from_message_row  # type: ignore
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                article = article_row_from_message_row(row)
+            except Exception as exc:  # noqa: BLE001 — индекс статей не должен ломать ingest
+                logger.warning(
+                    "article extract failed for %s/%s: %s",
+                    row.get("chat_id"), row.get("message_id"), exc,
+                )
+                continue
+            if article is not None:
+                out.append(article)
+        return out
+
+    def _upsert_articles_pg(self, conn: Any, articles: list[dict[str, Any]]) -> int:
+        """Upsert строк статей via direct Postgres. Fail-soft: warning, не исключение."""
+        if not articles:
+            return 0
+        q = f"""
+        INSERT INTO {self.schema}.telegram_articles
+        (chat_id, message_id, telegram_user_id, message_ts, url, title,
+         description, article_text, has_page, fetched_at, updated_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s, CASE WHEN %s THEN now() END, now())
+        ON CONFLICT (chat_id, message_id) DO UPDATE SET
+          url=EXCLUDED.url, title=EXCLUDED.title, description=EXCLUDED.description,
+          message_ts=EXCLUDED.message_ts,
+          -- не затирать ранее добытое тело пустым (edited-message без re-fetch)
+          article_text=CASE WHEN EXCLUDED.article_text <> ''
+                            THEN EXCLUDED.article_text
+                            ELSE {self.schema}.telegram_articles.article_text END,
+          has_page={self.schema}.telegram_articles.has_page OR EXCLUDED.has_page,
+          fetched_at=COALESCE(EXCLUDED.fetched_at, {self.schema}.telegram_articles.fetched_at),
+          updated_at=now()
+        """
+        cur = conn.cursor()
+        try:
+            params = [
+                (
+                    a["chat_id"], a["message_id"], a.get("telegram_user_id"),
+                    a.get("message_ts"), a.get("url"), a.get("title"),
+                    a.get("description"), a.get("article_text"),
+                    a.get("has_page", False), a.get("has_page", False),
+                )
+                for a in articles
+            ]
+            try:
+                from psycopg2.extras import execute_batch  # type: ignore
+
+                execute_batch(cur, q, params, page_size=100)
+            except ImportError:
+                for row_params in params:
+                    cur.execute(q, row_params)
+            conn.commit()
+            return len(articles)
+        except Exception as exc:  # noqa: BLE001
+            conn.rollback()
+            # Migration 20260722000001 применяется per-schema; на профиле без неё
+            # (tg_<slug>) глушим индекс на весь процесс вместо warning-шторма.
+            if "does not exist" in str(exc) and "telegram_articles" in str(exc):
+                self._articles_disabled = True
+                logger.warning(
+                    "%s.telegram_articles missing — article index disabled for "
+                    "this process; apply migration 20260722000001 to this schema",
+                    self.schema,
+                )
+            else:
+                logger.warning("telegram_articles upsert failed (%d rows): %s", len(articles), exc)
+            return 0
+        finally:
+            cur.close()
+
+    def _index_articles(self, conn: Any | None, rows: list[dict[str, Any]]) -> None:
+        """Best-effort индексация статей после успешной записи сообщений.
+
+        Только PG-путь: REST .upsert() делает replace всей строки и терял бы
+        merge-семантику (has_page OR, article_text CASE) — edited-message без
+        cached_page затирал бы добытое тело (review MAJOR-1). Без _postgres_url
+        индекс статей отключён (один warning на процесс).
+        """
+        if getattr(self, "_articles_disabled", False):
+            return
+        if conn is None:
+            if not getattr(self, "_articles_rest_warned", False):
+                self._articles_rest_warned = True
+                logger.warning(
+                    "telegram_articles index requires direct Postgres "
+                    "(SUPABASE_DB_URL); REST mode — article index disabled"
+                )
+            return
+        try:
+            articles = self._article_rows(rows)
+            if not articles:
+                return
+            self._upsert_articles_pg(conn, articles)
+        except Exception as exc:  # noqa: BLE001 — индекс статей не должен ломать ingest
+            logger.warning("telegram_articles index failed: %s", exc)
+
     def _write_message_pg(self, conn: Any, row: dict[str, Any]) -> bool:
         """Single message upsert via direct Postgres."""
         q = f"""
@@ -607,11 +724,15 @@ class SupabaseWriter:
                 return True
             if self._postgres_url:
                 with self._pg_conn() as conn:
-                    return self._write_message_pg(conn, row)
+                    ok = self._write_message_pg(conn, row)
+                    if ok:
+                        self._index_articles(conn, [row])
+                    return ok
             self._table(TABLE_MESSAGES).upsert(
                 row,
                 on_conflict="chat_id,message_id",
             ).execute()
+            self._index_articles(None, [row])
             return True
         except Exception as exc:
             logger.warning(
@@ -648,11 +769,15 @@ class SupabaseWriter:
         try:
             if self._postgres_url:
                 with self._pg_conn() as conn:
-                    return self._write_messages_batch_pg(conn, rows)
+                    written = self._write_messages_batch_pg(conn, rows)
+                    if written:
+                        self._index_articles(conn, rows)
+                    return written
             self._table(TABLE_MESSAGES).upsert(
                 rows,
                 on_conflict="chat_id,message_id",
             ).execute()
+            self._index_articles(None, rows)
             return len(rows)
         except Exception as exc:
             logger.warning(
@@ -1011,17 +1136,44 @@ class SupabaseWriter:
     # ------------------------------------------------------------------
 
     def _start_ingest_run_pg(self, conn: Any, run_id: str, mode: str) -> None:
+        """Записать старт прогона; переживает схему без telegram_user_id.
+
+        RCA 2026-07-26: миграция 20260605000001 §A не была применена к
+        rick_messages_tasks (таблица принадлежит supabase_admin, у писателя нет
+        прав ALTER) → КАЖДЫЙ boot/heartbeat падал «column telegram_user_id does
+        not exist», ingest_runs пустая с апреля, мониторинг считал живой
+        листенер мёртвым. Пишем без скоуп-колонки, когда её нет: наблюдаемость
+        важнее полноты поля, а `bd`-скоуп восстановим после ALTER.
+        """
         now = datetime.now(tz=timezone.utc).isoformat()
+        scoped = (
+            f"INSERT INTO {self.schema}.telegram_ingest_runs "
+            "(run_id, telegram_user_id, mode, started_at, status) "
+            "VALUES (%s,%s,%s,%s,'running')"
+        )
+        legacy = (
+            f"INSERT INTO {self.schema}.telegram_ingest_runs "
+            "(run_id, mode, started_at, status) VALUES (%s,%s,%s,'running')"
+        )
         cur = conn.cursor()
         try:
-            cur.execute(
-                f"""
-                INSERT INTO {self.schema}.telegram_ingest_runs
-                (run_id, telegram_user_id, mode, started_at, status)
-                VALUES (%s,%s,%s,%s,'running')
-                """,
-                (run_id, self.telegram_user_id, mode, now),
-            )
+            if getattr(self, "_ingest_runs_unscoped", False):
+                cur.execute(legacy, (run_id, mode, now))
+            else:
+                try:
+                    cur.execute(scoped, (run_id, self.telegram_user_id, mode, now))
+                except Exception as exc:  # noqa: BLE001
+                    if "telegram_user_id" not in str(exc) or "does not exist" not in str(exc):
+                        raise
+                    conn.rollback()
+                    self._ingest_runs_unscoped = True
+                    logger.warning(
+                        "%s.telegram_ingest_runs has no telegram_user_id column — "
+                        "writing run markers unscoped; apply migration "
+                        "20260605000001 §A to restore per-profile scope",
+                        self.schema,
+                    )
+                    cur.execute(legacy, (run_id, mode, now))
             conn.commit()
         except Exception:
             conn.rollback()
