@@ -458,14 +458,19 @@ class SupabaseWriter:
         # didn't thread it. security-4 fix (pr-hero-x0p iter-2): User/Bot entities
         # have no .title (only .first_name/.username) → fall back so an OTP-bot
         # named "verify bot" is caught by title/username skip patterns.
-        if chat_title is None:
+        # Guardian accepts only a real title string. Telethon entities provide
+        # ``str | None``, but partial mocks/adapters may surface sentinel objects;
+        # treating those as titles makes regex classification raise and causes a
+        # fail-closed drop of an otherwise valid message.
+        if not isinstance(chat_title, str) or not chat_title:
+            chat_title = None
             _mchat = getattr(message, "chat", None)
             if _mchat is not None:
-                chat_title = (
-                    getattr(_mchat, "title", None)
-                    or getattr(_mchat, "first_name", None)
-                    or getattr(_mchat, "username", None)
-                )
+                for field in ("title", "first_name", "username"):
+                    candidate = getattr(_mchat, field, None)
+                    if isinstance(candidate, str) and candidate:
+                        chat_title = candidate
+                        break
         try:
             guard, rules = _guard_rules()
             decision = guard.classify_message(chat_id, chat_title, text, rules)

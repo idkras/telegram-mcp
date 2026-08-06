@@ -240,6 +240,65 @@ class TestSupabaseWriterInit:
         assert writer._client is None
 
 
+class TestWriteMessagesBatchContract:
+    """chat_title is optional API context threaded to row conversion/guardian."""
+
+    @staticmethod
+    def _writer_with_recording_table():
+        from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
+
+        writer = SupabaseWriter.__new__(SupabaseWriter)
+        writer._postgres_url = None
+        query = MagicMock()
+        query.upsert.return_value = query
+        writer._table = MagicMock(return_value=query)
+        writer._telethon_message_to_row = MagicMock(
+            return_value={
+                "source": "telegram",
+                "telegram_user_id": "ikrasinsky",
+                "chat_id": "123",
+                "chat_type": "group",
+                "message_id": 1,
+                "raw": {},
+            }
+        )
+        return writer
+
+    def test_legacy_call_without_chat_title_remains_supported(self):
+        writer = self._writer_with_recording_table()
+        message = object()
+
+        written = __import__("asyncio").run(
+            writer.write_messages_batch([message], "123", "group")
+        )
+
+        assert written == 1
+        writer._telethon_message_to_row.assert_called_once_with(
+            message, "123", "group", None
+        )
+
+    def test_explicit_chat_title_is_threaded_to_row_conversion(self):
+        writer = self._writer_with_recording_table()
+        message = object()
+
+        written = __import__("asyncio").run(
+            writer.write_messages_batch(
+                [message],
+                "123",
+                "group",
+                chat_title="fizkl.ru Rick.ai Advising",
+            )
+        )
+
+        assert written == 1
+        writer._telethon_message_to_row.assert_called_once_with(
+            message,
+            "123",
+            "group",
+            "fizkl.ru Rick.ai Advising",
+        )
+
+
 class TestBackfillGuardianTitle:
     @pytest.mark.asyncio
     async def test_backfill_resolves_chat_title_for_guardian_skip_rules(self):

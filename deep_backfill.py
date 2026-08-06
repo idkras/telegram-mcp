@@ -300,7 +300,12 @@ async def deep_backfill_one_chat(
             valid_ids = [
                 int(getattr(m, "id", 0) or 0) for m in batch if int(getattr(m, "id", 0) or 0) > 0
             ]
-            n = await writer.write_messages_batch(batch, cid_int, chat_type, chat_title)
+            n = await writer.write_messages_batch(
+                batch,
+                cid_int,
+                chat_type,
+                chat_title=chat_title,
+            )
             pass_state["written"] += n
             if valid_ids:
                 batch_min = min(valid_ids)
