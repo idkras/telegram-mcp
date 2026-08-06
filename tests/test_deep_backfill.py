@@ -100,13 +100,14 @@ class FakeWriter:
         # flood_chats: chat_id -> remaining_floods (decrement per call)
         self._flood_chats = dict(flood_chats or {})
         self.written_batches = []
+        self.received_chat_titles = []
         self.cursor_updates = []
         self.runtime_events = []
 
     async def get_chat_cursor(self, chat_id):
         return self._cursors.get(int(chat_id))
 
-    async def write_messages_batch(self, batch, chat_id, chat_type):
+    async def write_messages_batch(self, batch, chat_id, chat_type, chat_title=None):
         if int(chat_id) in self._fail_chats:
             raise RuntimeError("simulated write failure")
         if int(chat_id) in self._flood_chats and self._flood_chats[int(chat_id)] > 0:
@@ -114,6 +115,7 @@ class FakeWriter:
             raise FloodWait(0)  # 0s flood → instant retry
         n = len(batch)
         self.written_batches.append((int(chat_id), n))
+        self.received_chat_titles.append(chat_title)
         return n
 
     async def update_chat_cursor(
@@ -193,6 +195,23 @@ def test_backward_walk_first_pass_from_last_seen():
     # Cursor update: floor moved to 150 incrementally (no backfill_completed
     # since seen > 0).
     assert (777, None, 150, None) in writer.cursor_updates
+
+
+def test_deep_backfill_threads_resolved_chat_title_to_batch_writer():
+    """The optional title is guardian context and survives the deep-backfill hop."""
+
+    class TitledClient(FakeClient):
+        async def get_entity(self, chat_id):
+            assert chat_id == 777
+            return type("Entity", (), {"title": "fizkl.ru Rick.ai Advising"})()
+
+    writer = FakeWriter(cursors={777: {"last_seen_message_id": 200}})
+    client = TitledClient(messages_by_chat={777: [FakeMsg(199)]})
+
+    res = run(deep_backfill_one_chat(client, writer, 777, "supergroup", per_run_limit=1))
+
+    assert res.written == 1
+    assert writer.received_chat_titles == ["fizkl.ru Rick.ai Advising"]
 
 
 # ── T2: resumable — второй проход продвигает floor ниже ───────────────────────
@@ -548,13 +567,14 @@ def test_floodwait_after_successful_flush_does_not_double_count():
             super().__init__(*args, **kwargs)
             self._write_calls = 0
 
-        async def write_messages_batch(self, batch, chat_id, chat_type):
+        async def write_messages_batch(self, batch, chat_id, chat_type, chat_title=None):
             self._write_calls += 1
             # На 2-м вызове в первом проходе — flood; ретрай (вызовы 3+) проходит.
             if self._write_calls == 2:
                 raise FloodWait(0)
             n = len(batch)
             self.written_batches.append((int(chat_id), n))
+            self.received_chat_titles.append(chat_title)
             return n
 
     writer = FloodAfterFirstBatchWriter(
@@ -626,7 +646,7 @@ def test_stalled_marker_when_no_writes_but_chats_active():
     # имитируем chat где iter возвращает что-то, но writer.write_batch вернёт 0
     # (имитация all-already-written скенарий).
     class ZeroWriteWriter(FakeWriter):
-        async def write_messages_batch(self, batch, chat_id, chat_type):
+        async def write_messages_batch(self, batch, chat_id, chat_type, chat_title=None):
             return 0  # ON CONFLICT — все уже записаны
 
     writer3 = ZeroWriteWriter(cursors={7070: {"last_backfill_message_id": 100}})

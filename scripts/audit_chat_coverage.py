@@ -45,10 +45,10 @@ from heroes_platform.shared.import_setup import enable  # noqa: E402
 
 enable(__file__)
 
-from heroes_platform.shared.credentials_manager import (  # noqa: E402
+from heroes_platform.credentials import (  # noqa: E402
     CredentialsManager,
 )
-from heroes_platform.shared.credentials_wrapper import (  # noqa: E402
+from heroes_platform.credentials.service_env import (  # noqa: E402
     get_service_credentials,
 )
 from telethon import TelegramClient  # noqa: E402

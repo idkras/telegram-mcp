@@ -10,22 +10,24 @@ import sys
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
+from heroes_platform.credentials.service_env import get_service_credentials
 from heroes_platform.heroes_telegram_mcp.event_handlers import register_event_handlers
-
-
-def _required(name: str) -> str:
-    value = os.getenv(name, "").strip()
-    if not value:
-        raise RuntimeError(f"{name} is required")
-    return value
 
 
 async def run_listener() -> None:
     profile = os.getenv("TELEGRAM_USER", "ikrasinsky")
+    credentials = get_service_credentials("telegram")
+    missing = [
+        name
+        for name in ("TELEGRAM_SESSION_STRING", "TELEGRAM_API_ID", "TELEGRAM_API_HASH")
+        if not credentials.get(name)
+    ]
+    if missing:
+        raise RuntimeError(f"Registry credentials are required: {', '.join(missing)}")
     client = TelegramClient(
-        StringSession(_required("TELEGRAM_SESSION_STRING")),
-        int(_required("TELEGRAM_API_ID")),
-        _required("TELEGRAM_API_HASH"),
+        StringSession(credentials["TELEGRAM_SESSION_STRING"]),
+        int(credentials["TELEGRAM_API_ID"]),
+        credentials["TELEGRAM_API_HASH"],
     )
     await client.connect()
     try:

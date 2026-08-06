@@ -9,6 +9,7 @@ User=idkras
 WorkingDirectory=/home/idkras/telegram-mcp
 EnvironmentFile=/etc/telegram-mcp/env.d/%i.env
 Environment=PYTHONPATH=/home/idkras/telegram-mcp
+Environment=HEROES_CREDENTIALS_REGISTRY=/home/idkras/telegram-mcp/heroes_harness/credentials_registry.yaml
 ExecStart=/home/idkras/telegram-mcp/.venv/bin/python scripts/catch_up_recent_telegram_to_supabase.py --profile %i --limit-messages 5000 --deep-backfill-budget 1000 --deep-backfill-per-chat 250 --deep-backfill-select-limit 50
 TimeoutStartSec=20min
 Nice=10

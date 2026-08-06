@@ -12,7 +12,7 @@ Architecture:
     - Logs ingest runs to telegram_ingest_runs with telegram_user_id scope
     - Dedup via unique index on (chat_id, message_id)
 
-Credentials: Mac Keychain via credentials_manager (supabase_rick_api_key)
+Credentials: registry-only API via heroes_platform.credentials (supabase_rick_api_key)
 Migration: 20250110000001_telegram_tdlib_tables.sql (must be applied first)
 """
 
@@ -159,11 +159,8 @@ def _get_postgres_url() -> str | None:
     When set, SupabaseWriter uses direct Postgres instead of REST — avoids PGRST106
     for schema rick_messages_tasks (Exposed schemas not required).
     """
-    url = os.getenv("SUPABASE_DB_URL")
-    if url:
-        return url
     try:
-        from heroes_platform.shared.credentials_manager import credentials_manager
+        from heroes_platform.credentials import credentials_manager
 
         result = credentials_manager.get_credential("supabase_rick_db_url")
         if result.success and result.value:
@@ -184,26 +181,19 @@ def _get_supabase_client() -> Any:
     """
     from supabase import create_client  # type: ignore
 
-    # Try environment variable first (for laba deployment)
-    api_key = os.getenv("SUPABASE_API_KEY")
+    api_key = None
+    try:
+        from heroes_platform.credentials import credentials_manager
 
-    if not api_key:
-        # Fall back to Mac Keychain (for local development)
-        try:
-            from heroes_platform.shared.credentials_manager import (
-                credentials_manager,
-            )
-
-            result = credentials_manager.get_credential("supabase_rick_api_key")
-            if result.success and result.value:
-                api_key = result.value
-        except ImportError:
-            pass
+        result = credentials_manager.get_credential("supabase_rick_api_key")
+        if result.success and result.value:
+            api_key = result.value
+    except ImportError:
+        pass
 
     if not api_key:
         raise RuntimeError(
-            "Supabase API key not found. Set SUPABASE_API_KEY env var "
-            "or store 'supabase_rick_api_key' in Mac Keychain."
+            "Supabase API key not found through registry id 'supabase_rick_api_key'."
         )
 
     url = os.getenv("SUPABASE_URL", SUPABASE_URL)
@@ -469,14 +459,19 @@ class SupabaseWriter:
         # didn't thread it. security-4 fix (pr-hero-x0p iter-2): User/Bot entities
         # have no .title (only .first_name/.username) → fall back so an OTP-bot
         # named "verify bot" is caught by title/username skip patterns.
-        if chat_title is None:
+        # Guardian accepts only a real title string. Telethon entities provide
+        # ``str | None``, but partial mocks/adapters may surface sentinel objects;
+        # treating those as titles makes regex classification raise and causes a
+        # fail-closed drop of an otherwise valid message.
+        if not isinstance(chat_title, str) or not chat_title:
+            chat_title = None
             _mchat = getattr(message, "chat", None)
             if _mchat is not None:
-                chat_title = (
-                    getattr(_mchat, "title", None)
-                    or getattr(_mchat, "first_name", None)
-                    or getattr(_mchat, "username", None)
-                )
+                for field in ("title", "first_name", "username"):
+                    candidate = getattr(_mchat, field, None)
+                    if isinstance(candidate, str) and candidate:
+                        chat_title = candidate
+                        break
         try:
             guard, rules = _guard_rules()
             decision = guard.classify_message(chat_id, chat_title, text, rules)

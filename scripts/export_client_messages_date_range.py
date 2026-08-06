@@ -21,7 +21,7 @@ sys.path.insert(0, str(workspace_root))
 from heroes_platform.shared.import_setup import enable
 
 enable(__file__)
-from heroes_platform.shared.credentials_wrapper import get_service_credentials
+from heroes_platform.credentials.service_env import get_service_credentials
 from heroes_platform.heroes_telegram_mcp.scripts.supabase_chats_by_client import (
     find_chats_by_client_alias,
 )
