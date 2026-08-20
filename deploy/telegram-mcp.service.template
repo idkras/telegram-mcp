@@ -29,7 +29,10 @@ Environment=TELEGRAM_MCP_SINGLE_PROFILE=true
 Environment=TELEGRAM_PG_POOL_MIN=1
 Environment=TELEGRAM_PG_POOL_MAX=2
 Environment=BACKFILL_ON_STARTUP=false
-Environment=DEEP_BACKFILL_IN_LISTENER=true
+# Deep history is a bounded maintenance startup mode.  Keep it off after the
+# historical pass so a saturated database pool cannot delay MCP HTTP startup;
+# the periodic forward catch-up remains scheduled by the listener.
+Environment=DEEP_BACKFILL_IN_LISTENER=false
 Environment=DEEP_BACKFILL_TOTAL_BUDGET=1000
 Environment=DEEP_BACKFILL_PER_CHAT_LIMIT=250
 Environment=DEEP_BACKFILL_SELECT_LIMIT=50

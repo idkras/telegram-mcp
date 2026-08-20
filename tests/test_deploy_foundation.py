@@ -39,7 +39,7 @@ def test_unit_renders_valid_systemd():
     assert "TELEGRAM_MCP_TRANSPORT=streamable-http" in u
     assert "TELEGRAM_MCP_HOST=127.0.0.1" in u
     assert "TELEGRAM_MCP_PORT=8766" in u
-    assert "DEEP_BACKFILL_IN_LISTENER=true" in u
+    assert "DEEP_BACKFILL_IN_LISTENER=false" in u
     assert "BACKFILL_ON_STARTUP=false" in u
     assert "DEEP_BACKFILL_DEACTIVATE_UNRESOLVED=true" in u
     assert "DEEP_BACKFILL_STARTUP_MAX_PASSES=200" in u
