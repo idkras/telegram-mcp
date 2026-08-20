@@ -28,6 +28,11 @@ Environment=TELEGRAM_MCP_SINGLE_PROFILE=true
 # sufficient and prevent the two services from reserving 16 sessions together.
 Environment=TELEGRAM_PG_POOL_MIN=1
 Environment=TELEGRAM_PG_POOL_MAX=2
+Environment=TELEGRAM_PG_ACQUIRE_TIMEOUT_SECONDS=30
+# The MCP health endpoint is queried by SwiftBar and agents.  One database
+# snapshot per profile/minute is enough; concurrent callers join the refresh.
+Environment=TELEGRAM_MONITORING_CACHE_TTL_SECONDS=60
+Environment=TELEGRAM_MONITORING_FAILURE_TTL_SECONDS=15
 Environment=BACKFILL_ON_STARTUP=false
 # Deep history is a bounded maintenance startup mode.  Keep it off after the
 # historical pass so a saturated database pool cannot delay MCP HTTP startup;
