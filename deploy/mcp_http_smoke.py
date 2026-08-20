@@ -69,11 +69,42 @@ async def smoke(url: str, required_tools: set[str], timeout: float) -> dict[str,
                 if item.get("name")
             }
             missing = sorted(required_tools - tools)
+            health = None
+            health_error = ""
+            if "get_ingest_health" in tools:
+                called = await client.post(
+                    url,
+                    headers=session_headers,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 3,
+                        "method": "tools/call",
+                        "params": {"name": "get_ingest_health", "arguments": {}},
+                    },
+                )
+                called.raise_for_status()
+                call_body = _payload(called)
+                result = call_body.get("result") or {}
+                health = result.get("structuredContent")
+                if not isinstance(health, dict):
+                    for item in result.get("content") or []:
+                        if item.get("type") == "text":
+                            try:
+                                parsed = json.loads(item.get("text") or "")
+                            except (TypeError, ValueError):
+                                continue
+                            if isinstance(parsed, dict):
+                                health = parsed
+                                break
+                if not isinstance(health, dict):
+                    health_error = "get_ingest_health returned no structured JSON"
             return {
                 "ok": not missing and bool(tools),
                 "initialize": "ok",
                 "tools_count": len(tools),
                 "missing_tools": missing,
+                "health": health,
+                "health_error": health_error,
                 "latency_ms": round((time.monotonic() - started) * 1000),
             }
     except Exception as exc:  # noqa: BLE001

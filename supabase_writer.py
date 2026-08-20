@@ -302,6 +302,68 @@ class SupabaseWriter:
         except Exception as exc:
             return False, f"Telegram LABA runtime probe failed: {exc}"
 
+    async def get_monitoring_snapshot(self) -> dict[str, Any]:
+        """Return owner-facing ingest/history evidence through this process's pool.
+
+        Monitoring must reuse the listener's existing session-mode connection.
+        Opening a third standalone Postgres client can itself exhaust a small
+        Supabase pool and turn a healthy listener into a false orange signal.
+        """
+        if not self._postgres_url:
+            return {"ok": False, "error": "direct Postgres monitoring is not configured"}
+        try:
+            with self._pg_conn() as conn:
+                cur = conn.cursor()
+                try:
+                    cur.execute(
+                        f"""
+                        SELECT
+                          extract(epoch from (now() -
+                            (SELECT created_at FROM {self.schema}.telegram_messages_raw
+                             ORDER BY id DESC LIMIT 1)))::int AS age_s,
+                          (SELECT count(*) FROM {self.schema}.telegram_chat_state
+                           WHERE is_active=true) AS active_chats,
+                          (SELECT count(*) FROM {self.schema}.telegram_chat_state
+                           WHERE is_active=true AND backfill_completed=true) AS completed_chats,
+                          (SELECT mode FROM {self.schema}.telegram_ingest_runs
+                           WHERE mode LIKE 'deep_backfill_%'
+                           ORDER BY started_at DESC LIMIT 1) AS deep_mode,
+                          (SELECT extract(epoch from (now() - started_at))::int
+                           FROM {self.schema}.telegram_ingest_runs
+                           WHERE mode LIKE 'deep_backfill_%'
+                           ORDER BY started_at DESC LIMIT 1) AS deep_age_s,
+                          (SELECT processed_chats FROM {self.schema}.telegram_ingest_runs
+                           WHERE mode LIKE 'deep_backfill_%'
+                           ORDER BY started_at DESC LIMIT 1) AS deep_chats,
+                          (SELECT inserted_messages FROM {self.schema}.telegram_ingest_runs
+                           WHERE mode LIKE 'deep_backfill_%'
+                           ORDER BY started_at DESC LIMIT 1) AS deep_messages,
+                          (SELECT last_error FROM {self.schema}.telegram_ingest_runs
+                           WHERE mode LIKE 'deep_backfill_%'
+                           ORDER BY started_at DESC LIMIT 1) AS deep_error
+                        """
+                    )
+                    row = cur.fetchone()
+                finally:
+                    cur.close()
+            if not row:
+                return {"ok": False, "error": "monitoring query returned no row"}
+            return {
+                "ok": True,
+                "profile": self.telegram_user_id,
+                "schema": self.schema,
+                "age_s": int(row[0]) if row[0] is not None else None,
+                "active_chats": int(row[1] or 0),
+                "completed_chats": int(row[2] or 0),
+                "deep_mode": row[3],
+                "deep_age_s": int(row[4]) if row[4] is not None else None,
+                "deep_chats": int(row[5] or 0),
+                "deep_messages": int(row[6] or 0),
+                "deep_error": str(row[7] or ""),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:240]}
+
     def _get_pool(self) -> Any:
         """R3 D5 fix (pr-hero-1u1): lazily create a BOUNDED connection pool. Before,
         every _pg_conn() opened a fresh psycopg2.connect — 200 chats × N batches during

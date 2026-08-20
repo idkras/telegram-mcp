@@ -679,6 +679,14 @@ def get_sender_name(message) -> str:
 
 
 @mcp.tool()
+async def get_ingest_health() -> dict[str, Any]:
+    """Return this profile's Supabase freshness and historical completion."""
+    from heroes_platform.heroes_telegram_mcp.event_handlers import _get_writer
+
+    return await _get_writer().get_monitoring_snapshot()
+
+
+@mcp.tool()
 async def get_chats(page: int = 1, page_size: int = 20) -> str:
     """
     Get a paginated list of chats.

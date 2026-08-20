@@ -37,3 +37,10 @@ def test_payload_rejects_sse_without_data():
     )
     with pytest.raises(ValueError, match="no data event"):
         SMOKE._payload(response)
+
+
+def test_smoke_source_calls_profile_ingest_health_after_tools_list():
+    source = MODULE_PATH.read_text()
+    assert '"name": "get_ingest_health"' in source
+    assert '"method": "tools/call"' in source
+    assert '"health": health' in source
