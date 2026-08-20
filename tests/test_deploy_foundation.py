@@ -188,6 +188,11 @@ def test_main_http_endpoint_is_profile_pinned_and_loopback_by_default():
     assert "This endpoint is pinned to profile=" in main
 
 
+def test_listener_boot_marker_cannot_block_mcp_event_loop():
+    handlers = (DEPLOY.parent / "event_handlers.py").read_text()
+    assert "await asyncio.to_thread(_write_marker)" in handlers
+
+
 def test_rce_injection_via_profiles_refused():
     """squad code-reviewer RCE: crafted --profiles must be REFUSED before any eval (no exec)."""
     import os, tempfile

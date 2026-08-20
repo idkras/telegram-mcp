@@ -18,9 +18,11 @@ Migration: 20250110000001_telegram_tdlib_tables.sql (must be applied first)
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -216,6 +218,7 @@ class SupabaseWriter:
     ) -> None:
         self._client: Any | None = None
         self._pg_pool: Any | None = None   # R3 D5: bounded connection pool (lazy)
+        self._pg_pool_init_lock = threading.Lock()
         self.telegram_user_id = telegram_user_id
         # Schema-per-profile: каждый аккаунт пишет в свою схему (data не смешивается).
         self.schema = _schema_for_profile(telegram_user_id)
@@ -309,6 +312,9 @@ class SupabaseWriter:
         Opening a third standalone Postgres client can itself exhaust a small
         Supabase pool and turn a healthy listener into a false orange signal.
         """
+        return await asyncio.to_thread(self._get_monitoring_snapshot_sync)
+
+    def _get_monitoring_snapshot_sync(self) -> dict[str, Any]:
         if not self._postgres_url:
             return {"ok": False, "error": "direct Postgres monitoring is not configured"}
         try:
@@ -371,11 +377,13 @@ class SupabaseWriter:
         stuck → lag grows geometrically. A ThreadedConnectionPool caps concurrency and
         reuses connections. Bounds via TELEGRAM_PG_POOL_MIN/MAX (default 1..8)."""
         if self._pg_pool is None:
-            from psycopg2.pool import ThreadedConnectionPool
+            with self._pg_pool_init_lock:
+                if self._pg_pool is None:
+                    from psycopg2.pool import ThreadedConnectionPool
 
-            minc = int(os.getenv("TELEGRAM_PG_POOL_MIN", "1"))
-            maxc = int(os.getenv("TELEGRAM_PG_POOL_MAX", "8"))
-            self._pg_pool = ThreadedConnectionPool(minc, maxc, self._postgres_url)
+                    minc = int(os.getenv("TELEGRAM_PG_POOL_MIN", "1"))
+                    maxc = int(os.getenv("TELEGRAM_PG_POOL_MAX", "8"))
+                    self._pg_pool = ThreadedConnectionPool(minc, maxc, self._postgres_url)
         return self._pg_pool
 
     @contextmanager
