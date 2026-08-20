@@ -1491,6 +1491,47 @@ class SupabaseWriter:
         finally:
             cur.close()
 
+    def _get_chat_cursors_pg(self, conn: Any) -> dict[str, dict[str, Any]]:
+        """Load every current user-scoped cursor in one statement.
+
+        Periodic reconciliation must not issue one SELECT per Telegram dialog.
+        Missing rows still fall back to the legacy per-chat lookup in the
+        caller, preserving compatibility during an incomplete migration.
+        """
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                f"""
+                SELECT *
+                FROM {self.schema}.telegram_chat_state
+                WHERE telegram_user_id=%s
+                """,
+                (self.telegram_user_id,),
+            )
+            cols = [d[0] for d in cur.description]
+            return {
+                str(row[cols.index("chat_id")]): dict(zip(cols, row))
+                for row in cur.fetchall()
+            }
+        finally:
+            cur.close()
+
+    async def get_chat_cursors(self) -> dict[str, dict[str, Any]] | None:
+        """Return a bulk cursor map when direct Postgres is available.
+
+        REST pagination differs between deployments, so the safe REST fallback
+        remains the existing per-chat method instead of silently truncating the
+        map at the API row limit.
+        """
+        if not self._postgres_url:
+            return None
+        try:
+            with self._pg_conn() as conn:
+                return self._get_chat_cursors_pg(conn)
+        except Exception as exc:
+            logger.warning("Failed to bulk-load chat cursors: %s", exc)
+            return None
+
     async def get_chat_cursor(self, chat_id: int | str) -> dict[str, Any] | None:
         """Get current user-scoped cursor state for a chat.
 
@@ -1834,9 +1875,12 @@ class SupabaseWriter:
         chat_id: int | str,
         chat_type: str = "unknown",
         limit: int = 1000,
+        *,
+        cursor: dict[str, Any] | None = None,
     ) -> int:
         """Backfill only messages newer than the last seen cursor."""
-        cursor = await self.get_chat_cursor(chat_id)
+        if cursor is None:
+            cursor = await self.get_chat_cursor(chat_id)
         if not cursor or not cursor.get("last_seen_message_id"):
             return 0
 

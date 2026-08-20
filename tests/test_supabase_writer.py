@@ -436,6 +436,29 @@ class TestPartialBatchCursorSafety:
         writer.update_chat_cursor.assert_awaited_once_with("123", last_seen_message_id=20)
 
     @pytest.mark.asyncio
+    async def test_catch_up_uses_preloaded_cursor_without_second_select(self):
+        from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
+
+        writer = SupabaseWriter.__new__(SupabaseWriter)
+        writer.batch_size = 10
+        writer.get_chat_cursor = AsyncMock(side_effect=AssertionError("duplicate cursor SELECT"))
+        writer.update_chat_cursor = AsyncMock(return_value=True)
+
+        async def full_write(batch, chat_id, chat_type="unknown", chat_title=None):
+            return len(batch)
+
+        writer.write_messages_batch = full_write
+        written = await writer.catch_up_recent(
+            self.Client(),
+            "123",
+            limit=10,
+            cursor={"last_seen_message_id": 10},
+        )
+
+        assert written == 10
+        writer.get_chat_cursor.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_backfill_does_not_advance_cursor_after_partial_batch_write(self):
         from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
 

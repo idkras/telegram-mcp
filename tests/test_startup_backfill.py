@@ -50,9 +50,10 @@ class FakeEntity:
 
 
 class FakeDialog:
-    def __init__(self, did: int, entity=None):
+    def __init__(self, did: int, entity=None, message=None):
         self.id = did
         self.entity = entity
+        self.message = message
 
 
 class FloodWait(Exception):
@@ -113,11 +114,18 @@ class FakeWriter:
         self.cursor_updates = []
         self.catch_up_calls = []
         self.runtime_events = []  # (mode, processed_chats, inserted_messages)
+        self.cursor_reads = 0
+        self.bulk_cursor_reads = 0
 
     async def get_chat_cursor(self, chat_id):
+        self.cursor_reads += 1
         return self._cursors.get(int(chat_id))
 
-    async def catch_up_recent(self, client, chat_id, chat_type="unknown", limit=1000):
+    async def get_chat_cursors(self):
+        self.bulk_cursor_reads += 1
+        return {str(chat_id): cursor for chat_id, cursor in self._cursors.items()}
+
+    async def catch_up_recent(self, client, chat_id, chat_type="unknown", limit=1000, *, cursor=None):
         if int(chat_id) in self._fail_chats:
             raise RuntimeError("simulated catch_up failure")
         if int(chat_id) in self._flood_chats:
@@ -176,6 +184,24 @@ def test_chat_with_cursor_calls_catch_up():
     assert truncated is False
     assert writer.catch_up_calls == [(100, "private", 5000)]
     assert writer.written_batches == []
+
+
+def test_bulk_cursor_and_dialog_top_skip_unchanged_chat_without_history_request():
+    dialogs = [
+        FakeDialog(100, FakeEntity(first_name="A"), message=FakeMsg(50)),
+        FakeDialog(200, FakeEntity(first_name="B"), message=FakeMsg(55)),
+    ]
+    writer = FakeWriter(
+        cursors={100: {"last_seen_message_id": 50}, 200: {"last_seen_message_id": 50}},
+        catch_up_returns={200: 2},
+    )
+    result = run(backfill_all_chats(FakeClient(dialogs), writer))
+    assert writer.bulk_cursor_reads == 1
+    assert writer.cursor_reads == 0
+    assert writer.catch_up_calls == [(200, "private", 5000)]
+    assert result.chats_scanned == 2
+    assert result.chats_unchanged == 1
+    assert result.messages_written == 2
 
 
 # ── T2: chat WITHOUT cursor → _seed_recent writes + INCREMENTAL cursor (B1) ───

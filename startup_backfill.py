@@ -259,6 +259,7 @@ async def backfill_one_chat(
     *,
     per_chat_limit: int,
     seed_limit: int,
+    cursor: dict[str, Any] | None = None,
 ) -> tuple[int, bool]:
     """Догнать один чат. Курсор есть → catch_up_recent (только новее курсора);
     нет → _seed_recent. FloodWaitError → sleep + один retry. Возвращает
@@ -266,10 +267,14 @@ async def backfill_one_chat(
     flood_max = _env_int("BACKFILL_FLOOD_WAIT_MAX_SECONDS", 300)
 
     async def _do() -> tuple[int, bool]:
-        cursor = await writer.get_chat_cursor(chat_id)
-        if cursor and cursor.get("last_seen_message_id"):
+        selected_cursor = cursor if cursor is not None else await writer.get_chat_cursor(chat_id)
+        if selected_cursor and selected_cursor.get("last_seen_message_id"):
             written = await writer.catch_up_recent(
-                client, chat_id, chat_type, limit=per_chat_limit
+                client,
+                chat_id,
+                chat_type,
+                limit=per_chat_limit,
+                cursor=selected_cursor,
             )
             return written, False
         return await _seed_recent(client, writer, chat_id, chat_type, limit=seed_limit)
@@ -304,6 +309,13 @@ async def backfill_all_chats(
 
     result = BackfillResult()
     scanned = 0
+    cursor_by_chat: dict[str, dict[str, Any]] | None = None
+    bulk_loader = getattr(writer, "get_chat_cursors", None)
+    if callable(bulk_loader):
+        try:
+            cursor_by_chat = await bulk_loader()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Bulk cursor load failed; using safe per-chat fallback: %s", exc)
     try:
         async for dialog in client.iter_dialogs():
             if dialog_limit and scanned >= dialog_limit:
@@ -314,6 +326,17 @@ async def backfill_all_chats(
                 logger.warning("Skipping dialog with empty chat_id: %r", dialog)
                 continue
             chat_type = _chat_type_from_dialog(dialog)
+            cursor = cursor_by_chat.get(str(chat_id)) if cursor_by_chat is not None else None
+            latest_message = getattr(dialog, "message", None)
+            latest_message_id = getattr(latest_message, "id", None)
+            if (
+                cursor
+                and cursor.get("last_seen_message_id")
+                and latest_message_id is not None
+                and int(latest_message_id) <= int(cursor["last_seen_message_id"])
+            ):
+                result.merge_chat(0)
+                continue
             try:
                 written, truncated = await backfill_one_chat(
                     client,
@@ -322,6 +345,7 @@ async def backfill_all_chats(
                     chat_type,
                     per_chat_limit=per_chat_limit,
                     seed_limit=seed_limit,
+                    cursor=cursor,
                 )
                 result.merge_chat(written, truncated=truncated)
                 if truncated:
