@@ -886,3 +886,11 @@ class TestDbLoadGuardrails:
         assert writer._write_messages_batch_pg(conn, rows) == 50
         execute_values.assert_called_once()
         assert conn.cursor.return_value.execute.call_count == 0
+
+    def test_monitoring_hot_path_avoids_full_hour_count(self):
+        import inspect
+        from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
+
+        source = inspect.getsource(SupabaseWriter._query_monitoring_snapshot_sync)
+
+        assert "created_at > now() - interval '1 hour'" not in source

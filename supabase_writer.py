@@ -416,8 +416,6 @@ class SupabaseWriter:
                           extract(epoch from (now() -
                             (SELECT created_at FROM {self.schema}.telegram_messages_raw
                              ORDER BY id DESC LIMIT 1)))::int AS age_s,
-                          (SELECT count(*) FROM {self.schema}.telegram_messages_raw
-                           WHERE created_at > now() - interval '1 hour') AS per_hour,
                           (SELECT count(*) FROM {self.schema}.telegram_chat_state
                            WHERE is_active=true) AS active_chats,
                           (SELECT count(*) FROM {self.schema}.telegram_chat_state
@@ -451,14 +449,13 @@ class SupabaseWriter:
                 "profile": self.telegram_user_id,
                 "schema": self.schema,
                 "age_s": int(row[0]) if row[0] is not None else None,
-                "per_hour": int(row[1] or 0),
-                "active_chats": int(row[2] or 0),
-                "completed_chats": int(row[3] or 0),
-                "deep_mode": row[4],
-                "deep_age_s": int(row[5]) if row[5] is not None else None,
-                "deep_chats": int(row[6] or 0),
-                "deep_messages": int(row[7] or 0),
-                "deep_error": str(row[8] or ""),
+                "active_chats": int(row[1] or 0),
+                "completed_chats": int(row[2] or 0),
+                "deep_mode": row[3],
+                "deep_age_s": int(row[4]) if row[4] is not None else None,
+                "deep_chats": int(row[5] or 0),
+                "deep_messages": int(row[6] or 0),
+                "deep_error": str(row[7] or ""),
             }
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:240]}
