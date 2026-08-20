@@ -23,6 +23,11 @@ Environment=TELEGRAM_MCP_HOST=127.0.0.1
 Environment=TELEGRAM_MCP_PORT=__MCP_PORT__
 Environment=TELEGRAM_MCP_PATH=/mcp
 Environment=TELEGRAM_MCP_SINGLE_PROFILE=true
+# Both profile units share the Supabase session-mode pool.  The writer runs
+# synchronously inside each asyncio process, so two connections per profile are
+# sufficient and prevent the two services from reserving 16 sessions together.
+Environment=TELEGRAM_PG_POOL_MIN=1
+Environment=TELEGRAM_PG_POOL_MAX=2
 Environment=BACKFILL_ON_STARTUP=false
 Environment=DEEP_BACKFILL_IN_LISTENER=true
 Environment=DEEP_BACKFILL_TOTAL_BUDGET=1000

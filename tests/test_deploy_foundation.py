@@ -43,6 +43,8 @@ def test_unit_renders_valid_systemd():
     assert "BACKFILL_ON_STARTUP=false" in u
     assert "DEEP_BACKFILL_DEACTIVATE_UNRESOLVED=true" in u
     assert "DEEP_BACKFILL_STARTUP_MAX_PASSES=200" in u
+    assert "TELEGRAM_PG_POOL_MIN=1" in u
+    assert "TELEGRAM_PG_POOL_MAX=2" in u
     assert "Alias=telegram-mcp-ikrasinsky-remote.service" in u
 
 
