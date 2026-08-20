@@ -3,7 +3,8 @@
 #
 # Ubuntu 24.04, systemd, user idkras. One systemd service per profile
 # (telegram-mcp-<profile>) so the doctor + SwitchBar see per-account status.
-# Safe to re-run: pulls latest code, re-renders units, restarts changed ones.
+# Safe to re-run on a clean checkout: fast-forwards code, re-renders units,
+# restarts changed ones. A dirty VPS checkout is refused, never overwritten.
 #
 # Usage (on sandbox-ik, or via ssh):
 #   deploy/deploy-sandbox-ik.sh [--profiles ikrasinsky,lisa] [--dry-run]
@@ -55,7 +56,10 @@ TEMPLATE="$HERE/telegram-mcp.service.template"
 # 1. code: clone or pull (idempotent)
 if [ -d "$APP_DIR/.git" ]; then
   log "pull latest into $APP_DIR"
-  run "git -C '$APP_DIR' fetch origin main && git -C '$APP_DIR' reset --hard origin/main"
+  if [ "$DRY_RUN" = 0 ] && { ! git -C "$APP_DIR" diff --quiet || ! git -C "$APP_DIR" diff --cached --quiet; }; then
+    _die "$APP_DIR has local tracked changes; preserve/reconcile them before deploy"
+  fi
+  run "git -C '$APP_DIR' fetch origin main && git -C '$APP_DIR' merge --ff-only origin/main"
 else
   log "clone $REPO_URL → $APP_DIR"
   run "git clone '$REPO_URL' '$APP_DIR'"
@@ -99,7 +103,13 @@ done
 # 4. render + install systemd unit per profile (idempotent)
 for p in "${PROF_ARR[@]}"; do
   unit="/etc/systemd/system/telegram-mcp-${p}.service"
+  case "$p" in
+    ikrasinsky) mcp_port=8766 ;;
+    lisa) mcp_port=8767 ;;
+    *) _die "no MCP port assigned for profile '$p'" ;;
+  esac
   rendered="$(sed -e "s/__PROFILE__/${p}/g" -e "s/__USER__/${APP_USER}/g" \
+                  -e "s/__MCP_PORT__/${mcp_port}/g" \
                   -e "s#__APP_DIR__#${APP_DIR}#g" "$TEMPLATE")"
   if [ "$DRY_RUN" = 1 ]; then
     echo "DRY: write $unit"; echo "$rendered" | sed 's/^/    /'
@@ -109,17 +119,13 @@ for p in "${PROF_ARR[@]}"; do
   fi
 done
 
-# Continuous resumable history walk. One template instance per profile; systemd
-# will not overlap a new run while the previous oneshot is still active.
-for name in telegram-mcp-backfill@.service telegram-mcp-backfill@.timer; do
-  run "sudo cp '$HERE/$name' '/etc/systemd/system/$name'"
-done
-
 # 5. enable + (re)start
 run "sudo systemctl daemon-reload"
 for p in "${PROF_ARR[@]}"; do
   run "sudo systemctl enable telegram-mcp-${p}.service"
-  run "sudo systemctl enable --now telegram-mcp-backfill@${p}.timer"
+  # Historical catch-up is now inside the same process/client as live ingest.
+  # Disable the legacy second-session timer if an older deploy left it behind.
+  run "sudo systemctl disable --now telegram-mcp-backfill@${p}.timer 2>/dev/null || true"
   # only start if env has a session string (else it would crash-loop pre-auth)
   if [ "$DRY_RUN" = 1 ]; then
     echo "DRY: start telegram-mcp-${p} if TELEGRAM_SESSION_STRING present"

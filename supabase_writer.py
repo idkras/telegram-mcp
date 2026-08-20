@@ -1005,6 +1005,83 @@ class SupabaseWriter:
             logger.warning("Failed to update cursor for chat %s: %s", chat_id, exc)
             return False
 
+    async def touch_backfill_attempt(self, chat_id: int | str) -> bool:
+        """Rotate a failed chat without claiming cursor progress or completion.
+
+        ``last_backfill_ts`` is the scheduler's last-attempt timestamp.  Moving
+        only that field keeps an inaccessible/left channel visible as a failed
+        runtime event while preventing it from monopolising every oldest-first
+        selection window.
+        """
+        cid = str(chat_id)
+        now = datetime.now(tz=timezone.utc)
+        try:
+            if self._postgres_url:
+                with self._pg_conn() as conn:
+                    self._ensure_chat_state_pg(conn, cid)
+                    cur = conn.cursor()
+                    try:
+                        cur.execute(
+                            f"""
+                            UPDATE {self.schema}.telegram_chat_state
+                            SET last_backfill_ts=%s
+                            WHERE telegram_user_id=%s AND chat_id=%s
+                            """,
+                            (now, self.telegram_user_id, cid),
+                        )
+                        conn.commit()
+                    finally:
+                        cur.close()
+                return True
+            self._table(TABLE_CHAT_STATE).upsert(
+                {
+                    "telegram_user_id": self.telegram_user_id,
+                    "chat_id": cid,
+                    "last_backfill_ts": now.isoformat(),
+                },
+                on_conflict="telegram_user_id,chat_id",
+            ).execute()
+            return True
+        except Exception as exc:
+            logger.warning("Failed to touch backfill attempt for chat %s: %s", chat_id, exc)
+            return False
+
+    async def mark_chat_inactive(self, chat_id: int | str) -> bool:
+        """Remove a proven inaccessible peer from the active history queue."""
+        cid = str(chat_id)
+        now = datetime.now(tz=timezone.utc)
+        try:
+            if self._postgres_url:
+                with self._pg_conn() as conn:
+                    self._ensure_chat_state_pg(conn, cid)
+                    cur = conn.cursor()
+                    try:
+                        cur.execute(
+                            f"""
+                            UPDATE {self.schema}.telegram_chat_state
+                            SET is_active=FALSE, last_backfill_ts=%s
+                            WHERE telegram_user_id=%s AND chat_id=%s
+                            """,
+                            (now, self.telegram_user_id, cid),
+                        )
+                        conn.commit()
+                    finally:
+                        cur.close()
+                return True
+            self._table(TABLE_CHAT_STATE).upsert(
+                {
+                    "telegram_user_id": self.telegram_user_id,
+                    "chat_id": cid,
+                    "is_active": False,
+                    "last_backfill_ts": now.isoformat(),
+                },
+                on_conflict="telegram_user_id,chat_id",
+            ).execute()
+            return True
+        except Exception as exc:
+            logger.warning("Failed to mark inaccessible chat %s inactive: %s", chat_id, exc)
+            return False
+
     def _get_chat_cursor_pg(self, conn: Any, chat_id: str) -> dict[str, Any] | None:
         cur = conn.cursor()
         try:

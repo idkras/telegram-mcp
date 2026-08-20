@@ -14,10 +14,15 @@ TEMPLATE = DEPLOY / "telegram-mcp.service.template"
 SCRIPT = DEPLOY / "deploy-sandbox-ik.sh"
 
 
-def _render(profile="ikrasinsky", user="idkras", app="/home/idkras/telegram-mcp"):
+def _render(
+    profile="ikrasinsky",
+    user="idkras",
+    app="/home/idkras/telegram-mcp",
+    mcp_port="8766",
+):
     t = TEMPLATE.read_text()
     return (t.replace("__PROFILE__", profile).replace("__USER__", user)
-             .replace("__APP_DIR__", app))
+             .replace("__APP_DIR__", app).replace("__MCP_PORT__", mcp_port))
 
 
 def test_unit_renders_valid_systemd():
@@ -31,6 +36,14 @@ def test_unit_renders_valid_systemd():
     assert "SyslogIdentifier=telegram-mcp-ikrasinsky" in u  # journald, not /app/logs
     assert "Restart=on-failure" in u
     assert "TimeoutStopSec" in u                             # graceful shutdown
+    assert "TELEGRAM_MCP_TRANSPORT=streamable-http" in u
+    assert "TELEGRAM_MCP_HOST=127.0.0.1" in u
+    assert "TELEGRAM_MCP_PORT=8766" in u
+    assert "DEEP_BACKFILL_IN_LISTENER=true" in u
+    assert "BACKFILL_ON_STARTUP=false" in u
+    assert "DEEP_BACKFILL_DEACTIVATE_UNRESOLVED=true" in u
+    assert "DEEP_BACKFILL_STARTUP_MAX_PASSES=200" in u
+    assert "Alias=telegram-mcp-ikrasinsky-remote.service" in u
 
 
 def test_unit_no_unrendered_placeholders():
@@ -91,8 +104,9 @@ def test_deploy_installs_declared_dependencies_and_standalone_adapter():
         assert (standalone / rel).is_file(), rel
     assert not (standalone / "heroes_platform/shared/credentials_wrapper.py").exists()
 
-    assert "telegram-mcp-backfill@.service" in script
-    assert "telegram-mcp-backfill@${p}.timer" in script
+    assert "reset --hard" not in script
+    assert "merge --ff-only origin/main" in script
+    assert "disable --now telegram-mcp-backfill@${p}.timer" in script
 
 
 def test_standalone_registry_declares_every_listener_secret_id_and_rejects_unknown() -> None:
@@ -142,6 +156,8 @@ def test_standalone_registry_declares_every_listener_secret_id_and_rejects_unkno
 def test_listener_entrypoint_is_noninteractive_and_long_lived():
     listener = (DEPLOY.parent / "listener.py").read_text()
     assert "run_until_disconnected" in listener
+    assert "run_streamable_http_async" in listener
+    assert "telegram_mcp.client = client" in listener
     assert "input(" not in listener
     assert "getpass" not in listener
 
@@ -161,6 +177,13 @@ def test_backfill_timer_is_bounded_and_resumable():
     cli = (DEPLOY.parent / "scripts" / "deep_backfill_history.py").read_text()
     assert "get_dialogs(limit=entity_cache_limit)" in cli
     assert '"--entity-cache-dialog-limit"' in cli
+
+
+def test_main_http_endpoint_is_profile_pinned_and_loopback_by_default():
+    main = (DEPLOY.parent / "main.py").read_text()
+    assert 'os.getenv("TELEGRAM_MCP_HOST", "127.0.0.1")' in main
+    assert 'os.getenv("TELEGRAM_MCP_SINGLE_PROFILE", "false")' in main
+    assert "This endpoint is pinned to profile=" in main
 
 
 def test_rce_injection_via_profiles_refused():

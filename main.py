@@ -371,7 +371,15 @@ if TELEGRAM_API_ID == 0:
 
 TELEGRAM_SESSION_NAME = os.getenv("TELEGRAM_SESSION_NAME")
 
-mcp = FastMCP("telegram")
+MCP_HOST = os.getenv("TELEGRAM_MCP_HOST", "127.0.0.1")
+MCP_PORT = int(os.getenv("TELEGRAM_MCP_PORT", "8766"))
+MCP_PATH = os.getenv("TELEGRAM_MCP_PATH", "/mcp")
+mcp = FastMCP(
+    "telegram",
+    host=MCP_HOST,
+    port=MCP_PORT,
+    streamable_http_path=MCP_PATH,
+)
 
 if SESSION_STRING:
     # Use the string session if available
@@ -405,6 +413,17 @@ async def _get_client_for_profile(profile: str) -> TelegramClient:
     """Return the Telegram client for the given profile. 'default'/'ik'/'ikrasinsky' -> main client; 'lisa' -> lazy-created Lisa client."""
     global _lisa_client
     normalized = (profile or "default").strip().lower()
+    active_profile = os.getenv("TELEGRAM_USER", "ikrasinsky").strip().lower()
+    if active_profile in ("ik", "ilyakrasinsky"):
+        active_profile = "ikrasinsky"
+    requested_profile = "ikrasinsky" if normalized in ("", "default", "ik", "ilyakrasinsky") else normalized
+    if requested_profile == active_profile:
+        return client
+    if os.getenv("TELEGRAM_MCP_SINGLE_PROFILE", "false").lower() == "true":
+        raise ValueError(
+            f"This endpoint is pinned to profile={active_profile}; "
+            f"use the {requested_profile} endpoint instead."
+        )
     if normalized in ("", "default", "ik", "ikrasinsky", "ilyakrasinsky"):
         return client
     if normalized == "lisa":

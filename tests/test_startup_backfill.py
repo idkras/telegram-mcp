@@ -364,6 +364,83 @@ def test_universal_user_id_passthrough():
     assert writer.telegram_user_id == "lisa"
 
 
+def test_startup_cycle_runs_deep_without_full_forward_scan(monkeypatch):
+    calls = []
+
+    async def fake_deep(_client, _writer):
+        calls.append("deep")
+
+    async def forbidden_forward(*_args, **_kwargs):
+        raise AssertionError("full forward scan must be disabled")
+
+    monkeypatch.setenv("DEEP_BACKFILL_IN_LISTENER", "true")
+    monkeypatch.setenv("BACKFILL_ON_STARTUP", "false")
+    monkeypatch.setattr(sb, "_run_deep_backfill_phase", fake_deep)
+    monkeypatch.setattr(sb, "run_startup_backfill", forbidden_forward)
+
+    result = run(sb.run_startup_cycle(FakeClient([]), FakeWriter()))
+
+    assert calls == ["deep"]
+    assert isinstance(result, BackfillResult)
+
+
+def test_deep_phase_rechecks_after_only_inaccessible_chats(monkeypatch):
+    from types import SimpleNamespace
+    from heroes_platform.heroes_telegram_mcp import deep_backfill
+
+    calls = []
+    outcomes = iter(
+        [
+            SimpleNamespace(
+                per_chat=[SimpleNamespace(error="inaccessible", inactivated=True)],
+                messages_written=0,
+            ),
+            SimpleNamespace(per_chat=[], messages_written=0),
+        ]
+    )
+
+    async def fake_deep(*_args, **_kwargs):
+        calls.append("run")
+        return next(outcomes)
+
+    monkeypatch.setattr(deep_backfill, "deep_backfill_all_chats", fake_deep)
+    result = run(sb._run_deep_backfill_phase(FakeClient([]), FakeWriter()))
+
+    assert calls == ["run", "run"]
+    assert result.per_chat == []
+
+
+def test_deep_phase_continues_progress_without_restarting_session(monkeypatch):
+    from types import SimpleNamespace
+    from heroes_platform.heroes_telegram_mcp import deep_backfill
+
+    calls = []
+    outcomes = iter(
+        [
+            SimpleNamespace(
+                per_chat=[SimpleNamespace(error=None, inactivated=False, completed=False)],
+                messages_written=250,
+            ),
+            SimpleNamespace(
+                per_chat=[SimpleNamespace(error=None, inactivated=False, completed=False)],
+                messages_written=250,
+            ),
+            SimpleNamespace(per_chat=[], messages_written=0),
+        ]
+    )
+
+    async def fake_deep(*_args, **_kwargs):
+        calls.append("run")
+        return next(outcomes)
+
+    monkeypatch.setenv("DEEP_BACKFILL_STARTUP_MAX_PASSES", "20")
+    monkeypatch.setattr(deep_backfill, "deep_backfill_all_chats", fake_deep)
+    result = run(sb._run_deep_backfill_phase(FakeClient([]), FakeWriter()))
+
+    assert calls == ["run", "run", "run"]
+    assert result.per_chat == []
+
+
 # ── schedule_backfill_tasks ───────────────────────────────────────────────────
 class FakeLoop:
     def __init__(self):
