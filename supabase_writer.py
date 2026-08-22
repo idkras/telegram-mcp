@@ -272,7 +272,7 @@ class SupabaseWriter:
         """
         try:
             if self._postgres_url:
-                with self._pg_conn() as conn:
+                with self._pg_conn(operation="ping") as conn:
                     cur = conn.cursor()
                     try:
                         cur.execute("SELECT 1")
@@ -340,6 +340,7 @@ class SupabaseWriter:
             cached = dict(self._monitoring_cache)
             cached.update(cache_hit=True, stale=False, cache_age_s=round(now - self._monitoring_cache_at, 3))
             cached["db_load"] = self.get_db_load_snapshot()
+            cached["ingest_accounting"] = self.get_ingest_accounting_snapshot()
             return cached
         if (
             self._monitoring_failure_cache is not None
@@ -348,6 +349,7 @@ class SupabaseWriter:
             failed = dict(self._monitoring_failure_cache)
             failed.update(cache_hit=True, stale=self._monitoring_cache is not None)
             failed["db_load"] = self.get_db_load_snapshot()
+            failed["ingest_accounting"] = self.get_ingest_accounting_snapshot()
             return failed
 
         with self._monitoring_refresh_lock:
@@ -358,6 +360,7 @@ class SupabaseWriter:
                 cached = dict(self._monitoring_cache)
                 cached.update(cache_hit=True, stale=False, cache_age_s=round(now - self._monitoring_cache_at, 3))
                 cached["db_load"] = self.get_db_load_snapshot()
+                cached["ingest_accounting"] = self.get_ingest_accounting_snapshot()
                 return cached
             if (
                 self._monitoring_failure_cache is not None
@@ -366,6 +369,7 @@ class SupabaseWriter:
                 failed = dict(self._monitoring_failure_cache)
                 failed.update(cache_hit=True, stale=self._monitoring_cache is not None)
                 failed["db_load"] = self.get_db_load_snapshot()
+                failed["ingest_accounting"] = self.get_ingest_accounting_snapshot()
                 return failed
             with self._db_metrics_lock:
                 self._db_metrics["monitoring_refreshes_total"] += 1
@@ -383,8 +387,11 @@ class SupabaseWriter:
                 self._monitoring_cache_at = time.monotonic()
                 self._monitoring_failure_cache = None
                 self._monitoring_failure_at = 0.0
+                self._refresh_recent_accepted_audit_sync()
                 result["db_load"] = self.get_db_load_snapshot()
+                result["ingest_accounting"] = self.get_ingest_accounting_snapshot()
                 self._monitoring_cache["db_load"] = result["db_load"]
+                self._monitoring_cache["ingest_accounting"] = result["ingest_accounting"]
                 return result
 
             failed = dict(result)
@@ -394,6 +401,7 @@ class SupabaseWriter:
                 cache_hit=False,
                 stale=self._monitoring_cache is not None,
                 db_load=self.get_db_load_snapshot(),
+                ingest_accounting=self.get_ingest_accounting_snapshot(),
             )
             if self._monitoring_cache is not None:
                 failed["last_good"] = dict(self._monitoring_cache)
@@ -496,7 +504,26 @@ class SupabaseWriter:
                 "monitoring_cache_hits_total": 0,
                 "monitoring_refreshes_total": 0,
             }
-            self._db_work_events: deque[tuple[float, int, int]] = deque()
+            self._db_operation_context = threading.local()
+            self._db_operation_totals: dict[str, dict[str, float | int]] = {}
+            self._db_work_events: deque[tuple[float, str, int, int, float]] = deque()
+            self._ingest_metrics = {
+                "observed_total": 0,
+                "accepted_total": 0,
+                "inserted_total": 0,
+                "duplicate_total": 0,
+                "accepted_unknown_total": 0,
+                "skipped_total": 0,
+                "failed_total": 0,
+            }
+            self._ingest_events: deque[tuple[float, dict[str, int]]] = deque()
+            self._recent_accepted_keys: deque[tuple[str, int]] = deque(
+                maxlen=max(10, int(os.getenv("TELEGRAM_RECONCILE_KEY_BUFFER", "500")))
+            )
+            self._reconciliation_snapshot: dict[str, Any] = {
+                "available": False,
+                "reason": "no reconciliation pass has completed in this process",
+            }
             self._monitoring_refresh_lock = threading.Lock()
             self._monitoring_cache: dict[str, Any] | None = None
             self._monitoring_cache_at = 0.0
@@ -511,17 +538,87 @@ class SupabaseWriter:
         rows: int = 0,
         duration_s: float = 0.0,
     ) -> None:
-        del operation, duration_s  # operation labels are intentionally not user data
         self._ensure_db_load_state()
+        operation = (operation or "other").strip()[:64] or "other"
         now = time.monotonic()
         with self._db_metrics_lock:
             self._db_metrics["sql_statements_total"] += max(0, statements)
             self._db_metrics["rows_written_total"] += max(0, rows)
-            if statements or rows:
-                self._db_work_events.append((now, max(0, statements), max(0, rows)))
+            totals = self._db_operation_totals.setdefault(
+                operation,
+                {"sql_total": 0, "rows_total": 0, "duration_s_total": 0.0},
+            )
+            totals["sql_total"] = int(totals["sql_total"]) + max(0, statements)
+            totals["rows_total"] = int(totals["rows_total"]) + max(0, rows)
+            totals["duration_s_total"] = float(totals["duration_s_total"]) + max(
+                0.0, duration_s
+            )
+            if statements or rows or duration_s:
+                self._db_work_events.append(
+                    (now, operation, max(0, statements), max(0, rows), max(0.0, duration_s))
+                )
             cutoff = now - 300.0
             while self._db_work_events and self._db_work_events[0][0] < cutoff:
                 self._db_work_events.popleft()
+
+    def _current_db_operation(self) -> str:
+        self._ensure_db_load_state()
+        return str(getattr(self._db_operation_context, "operation", "other") or "other")
+
+    def _record_ingest_outcome(self, **counts: int) -> None:
+        """Record process-local message outcomes without storing message content."""
+        self._ensure_db_load_state()
+        allowed = {key: max(0, int(value or 0)) for key, value in counts.items() if f"{key}_total" in self._ingest_metrics}
+        if not any(allowed.values()):
+            return
+        now = time.monotonic()
+        with self._db_metrics_lock:
+            for key, value in allowed.items():
+                self._ingest_metrics[f"{key}_total"] += value
+            self._ingest_events.append((now, allowed))
+            cutoff = now - 300.0
+            while self._ingest_events and self._ingest_events[0][0] < cutoff:
+                self._ingest_events.popleft()
+
+    def _record_accepted_keys(self, rows: list[dict[str, Any]]) -> None:
+        """Keep a bounded, content-free receipt set for the next exact audit."""
+        self._ensure_db_load_state()
+        keys = [
+            (str(row["chat_id"]), int(row["message_id"]))
+            for row in rows
+            if row.get("chat_id") is not None and row.get("message_id") is not None
+        ]
+        if not keys:
+            return
+        with self._db_metrics_lock:
+            self._recent_accepted_keys.extend(keys)
+
+    def get_recent_accepted_keys(self) -> list[tuple[str, int]]:
+        """Return bounded exact keys accepted by this process, never message content."""
+        self._ensure_db_load_state()
+        with self._db_metrics_lock:
+            return list(dict.fromkeys(self._recent_accepted_keys))
+
+    def set_reconciliation_snapshot(self, snapshot: dict[str, Any]) -> None:
+        """Publish the latest exact-key audit to health consumers."""
+        self._ensure_db_load_state()
+        with self._db_metrics_lock:
+            self._reconciliation_snapshot = dict(snapshot)
+
+    def get_ingest_accounting_snapshot(self) -> dict[str, Any]:
+        self._ensure_db_load_state()
+        now = time.monotonic()
+        with self._db_metrics_lock:
+            cutoff = now - 300.0
+            while self._ingest_events and self._ingest_events[0][0] < cutoff:
+                self._ingest_events.popleft()
+            result = dict(self._ingest_metrics)
+            for window_name, seconds in (("1m", 60.0), ("5m", 300.0)):
+                events = [counts for at, counts in self._ingest_events if at >= now - seconds]
+                for key in ("observed", "accepted", "inserted", "duplicate", "accepted_unknown", "skipped", "failed"):
+                    result[f"{key}_{window_name}"] = sum(event.get(key, 0) for event in events)
+            result["reconciliation"] = dict(self._reconciliation_snapshot)
+            return result
 
     def get_db_load_snapshot(self) -> dict[str, Any]:
         """Return process-local admission and actual SQL counters for monitoring."""
@@ -534,13 +631,25 @@ class SupabaseWriter:
             one_minute = [event for event in self._db_work_events if event[0] >= now - 60.0]
             five_minutes = list(self._db_work_events)
             snapshot = dict(self._db_metrics)
+            operations: dict[str, dict[str, int | float]] = {}
+            for operation, totals in sorted(self._db_operation_totals.items()):
+                one = [event for event in one_minute if event[1] == operation]
+                five = [event for event in five_minutes if event[1] == operation]
+                operations[operation] = {
+                    **totals,
+                    "sql_1m": sum(event[2] for event in one),
+                    "sql_5m": sum(event[2] for event in five),
+                    "rows_1m": sum(event[3] for event in one),
+                    "rows_5m": sum(event[3] for event in five),
+                }
             snapshot.update(
                 pool_min=self._pg_pool_min,
                 pool_max=self._pg_pool_max,
-                sql_statements_1m=sum(event[1] for event in one_minute),
-                sql_statements_5m=sum(event[1] for event in five_minutes),
-                rows_written_1m=sum(event[2] for event in one_minute),
-                rows_written_5m=sum(event[2] for event in five_minutes),
+                sql_statements_1m=sum(event[2] for event in one_minute),
+                sql_statements_5m=sum(event[2] for event in five_minutes),
+                rows_written_1m=sum(event[3] for event in one_minute),
+                rows_written_5m=sum(event[3] for event in five_minutes),
+                operations=operations,
             )
             return snapshot
 
@@ -564,7 +673,9 @@ class SupabaseWriter:
                             try:
                                 return super().execute(query, vars)
                             finally:
-                                writer._record_db_work("cursor_execute", statements=1)
+                                writer._record_db_work(
+                                    writer._current_db_operation(), statements=1
+                                )
 
                         def executemany(self, query: Any, vars_list: Any) -> Any:
                             values = list(vars_list)
@@ -572,7 +683,7 @@ class SupabaseWriter:
                                 return super().executemany(query, values)
                             finally:
                                 writer._record_db_work(
-                                    "cursor_executemany", statements=len(values)
+                                    writer._current_db_operation(), statements=len(values)
                                 )
 
                     self._pg_pool = ThreadedConnectionPool(
@@ -650,6 +761,7 @@ class SupabaseWriter:
                 f"for {operation} (max={self._pg_pool_max})"
             )
         conn = None
+        previous_operation = self._current_db_operation()
         try:
             for attempt in range(2):
                 candidate = pool.getconn()
@@ -669,6 +781,7 @@ class SupabaseWriter:
                         raise
             if conn is None:  # defensive: loop above either assigns or raises
                 raise ConnectionError("no healthy Postgres connection available")
+            self._db_operation_context.operation = operation
             with self._db_metrics_lock:
                 self._db_metrics["pool_in_use"] += 1
                 self._db_metrics["pool_checkouts_total"] += 1
@@ -681,6 +794,7 @@ class SupabaseWriter:
                 self._db_metrics["db_errors_total"] += 1
             raise
         finally:
+            self._db_operation_context.operation = previous_operation
             try:
                 if conn is not None:
                     discard = bool(getattr(conn, "closed", False))
@@ -705,7 +819,7 @@ class SupabaseWriter:
     def _get_runtime_activity(self) -> tuple[datetime | None, datetime | None]:
         """Return latest listener heartbeat timestamp and latest message timestamp."""
         if self._postgres_url:
-            with self._pg_conn() as conn:
+            with self._pg_conn(operation="runtime_activity") as conn:
                 return self._get_runtime_activity_pg(conn)
         return self._get_runtime_activity_rest()
 
@@ -772,6 +886,62 @@ class SupabaseWriter:
     # Message writing
     # ------------------------------------------------------------------
 
+    def _classify_message_guard(
+        self,
+        message: Any,
+        chat_id: int | str,
+        chat_title: str | None = None,
+    ) -> tuple[Any, Any, Any, str | None, str]:
+        """Run the canonical index guardian once for write and reconciliation.
+
+        Reconciliation must apply the same allow/skip decision as the writer.
+        Otherwise a deliberately excluded OTP/SMS relay is reported as a lost
+        Supabase row even though the policy says that row must never be stored.
+        """
+        text_value = getattr(message, "text", "") or ""
+        resolved_title = chat_title if isinstance(chat_title, str) and chat_title else None
+        if resolved_title is None:
+            message_chat = getattr(message, "chat", None)
+            if message_chat is not None:
+                for field in ("title", "first_name", "username"):
+                    candidate = getattr(message_chat, field, None)
+                    if isinstance(candidate, str) and candidate:
+                        resolved_title = candidate
+                        break
+        guard, rules = _guard_rules()
+        decision = guard.classify_message(chat_id, resolved_title, text_value, rules)
+        return guard, rules, decision, resolved_title, text_value
+
+    def classify_message_for_ingest(
+        self,
+        message: Any,
+        chat_id: int | str,
+        chat_title: str | None = None,
+    ) -> dict[str, Any]:
+        """Return a content-free guardian verdict for exact-key reconciliation."""
+        try:
+            _guard, _rules, decision, _title, _text = self._classify_message_guard(
+                message,
+                chat_id,
+                chat_title,
+            )
+            return {
+                "eligible": decision.action != "skip",
+                "reason": "eligible" if decision.action != "skip" else "policy_skip",
+                "classification_error": False,
+            }
+        except Exception as exc:  # noqa: BLE001 - mirror fail-closed write behavior
+            logger.warning(
+                "index guardian classification error on chat %s: %s — fail-closed skip",
+                chat_id,
+                exc,
+            )
+            return {
+                "eligible": False,
+                "reason": f"guard_error:{type(exc).__name__}",
+                "classification_error": True,
+            }
+
     def _telethon_message_to_row(
         self,
         message: Any,
@@ -821,30 +991,15 @@ class SupabaseWriter:
         msg_date = getattr(message, "date", None)
         message_ts = msg_date.isoformat() if msg_date else None
 
-        text = getattr(message, "text", "") or ""
-
-        # Index guardian: skip blacklisted chats, mask sensitive values.
-        # D-core-1 fix: pass real chat_title so title_skip_regex fires (e.g. a
-        # "sms Inbox" chat not in id_tails). Derive from message.chat when caller
-        # didn't thread it. security-4 fix (pr-hero-x0p iter-2): User/Bot entities
-        # have no .title (only .first_name/.username) → fall back so an OTP-bot
-        # named "verify bot" is caught by title/username skip patterns.
-        # Guardian accepts only a real title string. Telethon entities provide
-        # ``str | None``, but partial mocks/adapters may surface sentinel objects;
-        # treating those as titles makes regex classification raise and causes a
-        # fail-closed drop of an otherwise valid message.
-        if not isinstance(chat_title, str) or not chat_title:
-            chat_title = None
-            _mchat = getattr(message, "chat", None)
-            if _mchat is not None:
-                for field in ("title", "first_name", "username"):
-                    candidate = getattr(_mchat, field, None)
-                    if isinstance(candidate, str) and candidate:
-                        chat_title = candidate
-                        break
+        # Index guardian: skip blacklisted chats, mask sensitive values. The
+        # helper is also used by reconciliation so policy skips and data loss
+        # cannot be conflated in monitoring.
         try:
-            guard, rules = _guard_rules()
-            decision = guard.classify_message(chat_id, chat_title, text, rules)
+            guard, rules, decision, chat_title, text = self._classify_message_guard(
+                message,
+                chat_id,
+                chat_title,
+            )
             if decision.action == "skip":
                 logger.info("guardian skip chat %s: %s", chat_id, decision.reason)
                 return None
@@ -1008,6 +1163,7 @@ class SupabaseWriter:
           sender_user_id=EXCLUDED.sender_user_id, sender_name=EXCLUDED.sender_name,
           sender_username=EXCLUDED.sender_username, message_ts=EXCLUDED.message_ts,
           text=EXCLUDED.text, raw=EXCLUDED.raw
+        RETURNING (xmax = 0) AS inserted
         """
         cur = conn.cursor()
         try:
@@ -1027,8 +1183,16 @@ class SupabaseWriter:
                     json.dumps(row["raw"]),
                 ),
             )
+            outcome = cur.fetchone() if hasattr(cur, "fetchone") else None
             conn.commit()
-            self._record_db_work("message_upsert", rows=1)
+            self._record_db_work("live_message", rows=1)
+            self._record_accepted_keys([row])
+            if outcome is None:
+                self._record_ingest_outcome(accepted=1, accepted_unknown=1)
+            elif bool(outcome[0]):
+                self._record_ingest_outcome(accepted=1, inserted=1)
+            else:
+                self._record_ingest_outcome(accepted=1, duplicate=1)
             return True
         except Exception:
             conn.rollback()
@@ -1047,6 +1211,7 @@ class SupabaseWriter:
           sender_user_id=EXCLUDED.sender_user_id, sender_name=EXCLUDED.sender_name,
           sender_username=EXCLUDED.sender_username, message_ts=EXCLUDED.message_ts,
           text=EXCLUDED.text, raw=EXCLUDED.raw
+        RETURNING (xmax = 0) AS inserted
         """
         cur = conn.cursor()
         try:
@@ -1068,15 +1233,28 @@ class SupabaseWriter:
                 )
                 for row in rows
             ]
-            execute_values(
+            outcomes = execute_values(
                 cur,
                 q,
                 values,
                 template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
                 page_size=100,
+                fetch=True,
             )
             conn.commit()
-            self._record_db_work("message_batch_upsert", rows=len(rows))
+            self._record_db_work("message_batch", rows=len(rows))
+            self._record_accepted_keys(rows)
+            if outcomes is None:
+                self._record_ingest_outcome(
+                    accepted=len(rows), accepted_unknown=len(rows)
+                )
+            else:
+                inserted = sum(1 for outcome in outcomes if bool(outcome[0]))
+                self._record_ingest_outcome(
+                    accepted=len(rows),
+                    inserted=inserted,
+                    duplicate=max(0, len(rows) - inserted),
+                )
             return len(rows)
         except Exception:
             conn.rollback()
@@ -1090,6 +1268,8 @@ class SupabaseWriter:
         chat_id: int | str,
         chat_type: str = "unknown",
         chat_title: str | None = None,
+        *,
+        _count_ingest: bool = True,
     ) -> bool:
         """Write a single Telethon message to Supabase.
 
@@ -1098,9 +1278,13 @@ class SupabaseWriter:
         Returns:
             True if write succeeded, False otherwise.
         """
+        if _count_ingest:
+            self._record_ingest_outcome(observed=1)
         try:
             row = self._telethon_message_to_row(message, chat_id, chat_type, chat_title)
             if row is None:  # guardian skipped a blacklisted chat — handled, not written
+                if _count_ingest:
+                    self._record_ingest_outcome(skipped=1)
                 return True
             if self._postgres_url:
                 def _write() -> bool:
@@ -1110,14 +1294,20 @@ class SupabaseWriter:
                             self._index_articles(conn, [row])
                         return ok
 
-                return await asyncio.to_thread(_write)
+                result = await asyncio.to_thread(_write)
+                return result
             self._table(TABLE_MESSAGES).upsert(
                 row,
                 on_conflict="chat_id,message_id",
             ).execute()
+            self._record_accepted_keys([row])
             self._index_articles(None, [row])
+            if _count_ingest:
+                self._record_ingest_outcome(accepted=1, accepted_unknown=1)
             return True
         except Exception as exc:
+            if _count_ingest:
+                self._record_ingest_outcome(failed=1)
             logger.warning(
                 "Failed to write message %s in chat %s: %s",
                 getattr(message, "id", "?"),
@@ -1141,13 +1331,19 @@ class SupabaseWriter:
         if not messages:
             return 0
 
+        self._record_ingest_outcome(observed=len(messages))
+
         rows = [
             r
             for m in messages
             if (r := self._telethon_message_to_row(m, chat_id, chat_type, chat_title)) is not None
         ]
         if not rows:  # all messages skipped by guardian (blacklisted chat)
+            self._record_ingest_outcome(skipped=len(messages))
             return 0
+        skipped = max(0, len(messages) - len(rows))
+        if skipped:
+            self._record_ingest_outcome(skipped=skipped)
 
         try:
             if self._postgres_url:
@@ -1163,7 +1359,9 @@ class SupabaseWriter:
                 rows,
                 on_conflict="chat_id,message_id",
             ).execute()
+            self._record_accepted_keys(rows)
             self._index_articles(None, rows)
+            self._record_ingest_outcome(accepted=len(rows), accepted_unknown=len(rows))
             return len(rows)
         except Exception as exc:
             logger.warning(
@@ -1173,12 +1371,20 @@ class SupabaseWriter:
                 exc,
             )
             if self._postgres_url:
+                self._record_ingest_outcome(failed=len(rows))
                 return 0
             # Fall back to individual writes (REST only)
             ok = 0
             for msg in messages:
-                if await self.write_message(msg, chat_id, chat_type):
+                if await self.write_message(
+                    msg, chat_id, chat_type, chat_title, _count_ingest=False
+                ):
                     ok += 1
+            self._record_ingest_outcome(
+                accepted=ok,
+                accepted_unknown=ok,
+                failed=max(0, len(rows) - ok),
+            )
             return ok
 
     # ------------------------------------------------------------------
@@ -1225,7 +1431,7 @@ class SupabaseWriter:
         try:
             cid = str(chat_id)
             if self._postgres_url:
-                with self._pg_conn() as conn:
+                with self._pg_conn(operation="chat_upsert") as conn:
                     return self._upsert_chat_pg(conn, cid, chat_type, chat_title, chat_username)
             row: dict[str, Any] = {
                 "chat_id": cid,
@@ -1406,7 +1612,7 @@ class SupabaseWriter:
         now = datetime.now(tz=timezone.utc)
         try:
             if self._postgres_url:
-                with self._pg_conn() as conn:
+                with self._pg_conn(operation="backfill_attempt") as conn:
                     self._ensure_chat_state_pg(conn, cid)
                     cur = conn.cursor()
                     try:
@@ -1441,7 +1647,7 @@ class SupabaseWriter:
         now = datetime.now(tz=timezone.utc)
         try:
             if self._postgres_url:
-                with self._pg_conn() as conn:
+                with self._pg_conn(operation="chat_inactivate") as conn:
                     self._ensure_chat_state_pg(conn, cid)
                     cur = conn.cursor()
                     try:
@@ -1526,11 +1732,113 @@ class SupabaseWriter:
         if not self._postgres_url:
             return None
         try:
-            with self._pg_conn() as conn:
+            with self._pg_conn(operation="cursor_bulk_read") as conn:
                 return self._get_chat_cursors_pg(conn)
         except Exception as exc:
             logger.warning("Failed to bulk-load chat cursors: %s", exc)
             return None
+
+    def _audit_message_keys_sync(
+        self,
+        keys: list[tuple[str, int]],
+        *,
+        operation: str = "reconcile_heads",
+    ) -> dict[str, Any]:
+        """Compare Telegram-observed exact keys with bronze in one SQL statement."""
+        normalized = list(dict.fromkeys((str(chat_id), int(message_id)) for chat_id, message_id in keys))
+        observed_at = datetime.now(tz=timezone.utc).isoformat()
+        if not normalized:
+            return {
+                "available": True,
+                "observed_at": observed_at,
+                "checked": 0,
+                "present": 0,
+                "missing": 0,
+                "missing_keys_omitted": 0,
+            }
+        if not self._postgres_url:
+            return {
+                "available": False,
+                "observed_at": observed_at,
+                "reason": "exact composite-key audit requires direct Postgres",
+                "checked": len(normalized),
+            }
+        try:
+            from psycopg2.extras import execute_values  # type: ignore
+
+            with self._pg_conn(operation=operation, timeout_seconds=5.0) as conn:
+                cur = conn.cursor()
+                try:
+                    expected = [
+                        (self.telegram_user_id, chat_id, message_id)
+                        for chat_id, message_id in normalized
+                    ]
+                    rows = execute_values(
+                        cur,
+                        f"""
+                        WITH expected(telegram_user_id, chat_id, message_id) AS (VALUES %s)
+                        SELECT expected.chat_id, expected.message_id
+                        FROM expected
+                        JOIN {self.schema}.telegram_messages_raw AS raw
+                          ON raw.telegram_user_id=expected.telegram_user_id
+                         AND raw.chat_id=expected.chat_id
+                         AND raw.message_id=expected.message_id
+                        """,
+                        expected,
+                        template="(%s::text,%s::text,%s::bigint)",
+                        fetch=True,
+                        page_size=max(1, min(1000, len(normalized))),
+                    )
+                finally:
+                    cur.close()
+            present_keys = {(str(row[0]), int(row[1])) for row in (rows or [])}
+            missing_keys = [key for key in normalized if key not in present_keys]
+            return {
+                "available": True,
+                "observed_at": observed_at,
+                "checked": len(normalized),
+                "present": len(present_keys),
+                "missing": len(missing_keys),
+                "missing_keys_omitted": len(missing_keys),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "available": False,
+                "observed_at": observed_at,
+                "reason": f"{type(exc).__name__}: {exc}"[:240],
+                "checked": len(normalized),
+            }
+
+    async def audit_message_keys(
+        self,
+        keys: list[tuple[str, int]],
+        *,
+        operation: str = "reconcile_heads",
+    ) -> dict[str, Any]:
+        """Non-blocking owner-facing exact-key audit for a bounded Telegram window."""
+        return await asyncio.to_thread(
+            self._audit_message_keys_sync,
+            keys,
+            operation=operation,
+        )
+
+    def _refresh_recent_accepted_audit_sync(self) -> None:
+        """Refresh bounded write receipts once per monitoring TTL, not per request."""
+        audit = self._audit_message_keys_sync(
+            self.get_recent_accepted_keys(),
+            operation="reconcile_accepted",
+        )
+        self._ensure_db_load_state()
+        with self._db_metrics_lock:
+            snapshot = dict(self._reconciliation_snapshot)
+            snapshot.update(
+                accepted_checked=int(audit.get("checked") or 0),
+                accepted_present=int(audit.get("present") or 0),
+                accepted_missing=int(audit.get("missing") or 0),
+                accepted_audit_available=bool(audit.get("available")),
+                audit_key_scope="dialog_heads_and_recent_accepted",
+            )
+            self._reconciliation_snapshot = snapshot
 
     async def get_chat_cursor(self, chat_id: int | str) -> dict[str, Any] | None:
         """Get current user-scoped cursor state for a chat.
@@ -1541,7 +1849,7 @@ class SupabaseWriter:
         try:
             cid = str(chat_id)
             if self._postgres_url:
-                with self._pg_conn() as conn:
+                with self._pg_conn(operation="cursor_single_read") as conn:
                     state = self._get_chat_cursor_pg(conn, cid)
                     if state:
                         return state
@@ -1611,7 +1919,7 @@ class SupabaseWriter:
         pattern = f"%{q}%"
         try:
             if self._postgres_url:
-                with self._pg_conn() as conn:
+                with self._pg_conn(operation="chat_lookup") as conn:
                     return self._lookup_chats_by_query_pg(conn, pattern, limit)
             seen: set[str] = set()
             out: list[dict[str, Any]] = []
@@ -1692,7 +2000,7 @@ class SupabaseWriter:
         """Start a new ingest run and return its run_id."""
         run_id = str(uuid.uuid4())
         if self._postgres_url:
-            with self._pg_conn() as conn:
+            with self._pg_conn(operation="runtime_event_start") as conn:
                 self._start_ingest_run_pg(conn, run_id, mode)
         else:
             self._table(TABLE_RUNS).insert(
@@ -1744,7 +2052,7 @@ class SupabaseWriter:
     ) -> None:
         """Mark an ingest run as finished."""
         if self._postgres_url:
-            with self._pg_conn() as conn:
+            with self._pg_conn(operation="runtime_event_finish") as conn:
                 self._finish_ingest_run_pg(conn, run_id, processed_chats, inserted_messages, error)
             return
         status = "failed" if error else "success"
@@ -1866,6 +2174,7 @@ class SupabaseWriter:
 
         except Exception as exc:
             logger.warning("Backfill error for chat %s: %s", chat_id, exc)
+            raise
 
         return total_written
 
@@ -1947,6 +2256,7 @@ class SupabaseWriter:
                 )
         except Exception as exc:
             logger.warning("Recent catch-up error for chat %s: %s", chat_id, exc)
+            raise
 
         return total_written
 

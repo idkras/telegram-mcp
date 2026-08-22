@@ -459,6 +459,25 @@ class TestPartialBatchCursorSafety:
         writer.get_chat_cursor.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_catch_up_propagates_iteration_error_to_pass_orchestrator(self):
+        from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
+
+        writer = SupabaseWriter.__new__(SupabaseWriter)
+        writer.batch_size = 10
+        writer.get_chat_cursor = AsyncMock(return_value={"last_seen_message_id": 10})
+
+        class BrokenClient:
+            async def get_entity(self, chat_id):
+                return None
+
+            async def iter_messages(self, **_kwargs):
+                raise RuntimeError("telegram read failed")
+                yield  # pragma: no cover - keeps this an async generator
+
+        with pytest.raises(RuntimeError, match="telegram read failed"):
+            await writer.catch_up_recent(BrokenClient(), "123", limit=10)
+
+    @pytest.mark.asyncio
     async def test_backfill_does_not_advance_cursor_after_partial_batch_write(self):
         from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
 
