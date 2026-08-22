@@ -24,7 +24,7 @@ if shared_path.exists():
     sys.path.insert(0, str(shared_path))
 
 try:
-    from heroes_platform.credentials import credentials_manager
+    from credentials_registry import credentials_manager
     from supabase import create_client, Client
 except ImportError as e:
     print(f"❌ Ошибка импорта: {e}")

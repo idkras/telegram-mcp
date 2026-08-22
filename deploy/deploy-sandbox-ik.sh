@@ -70,14 +70,14 @@ log "install deps"
 run "'$APP_DIR/.venv/bin/pip' install -q --upgrade pip"
 run "'$APP_DIR/.venv/bin/pip' install -q -r '$APP_DIR/requirements.txt' -r '$APP_DIR/requirements-laba.txt'"
 
-# Standalone checkout compatibility. Runtime modules historically import through
-# heroes_platform.*, while this deploy intentionally clones telegram-mcp alone.
-# Install the registry-backed partner runtime and expose this checkout as the package.
-run "mkdir -p '$APP_DIR/heroes_platform/shared'"
-run "cp -R '$APP_DIR/deploy/standalone/heroes_platform/.' '$APP_DIR/heroes_platform/'"
-run "mkdir -p '$APP_DIR/heroes_harness'"
-run "cp '$APP_DIR/deploy/standalone/heroes_harness/credentials_registry.yaml' '$APP_DIR/heroes_harness/credentials_registry.yaml'"
-run "test -e '$APP_DIR/heroes_platform/heroes_telegram_mcp' || ln -s .. '$APP_DIR/heroes_platform/heroes_telegram_mcp'"
+# Credential runtime and metadata are deliberately not vendored here. This
+# service must be deployed by Heroes Harness, which installs the canonical
+# 0-credentials-registry skill and its profile registry before this script.
+if [ "$DRY_RUN" = 1 ]; then
+  echo "DRY: verify canonical credentials_registry runtime is installed"
+elif ! "$APP_DIR/.venv/bin/python" -c 'import credentials_registry' >/dev/null 2>&1; then
+  _die "credentials_registry runtime missing; deploy through Heroes Harness"
+fi
 
 # 3. per-profile env skeleton (does NOT overwrite an existing filled env)
 run "sudo mkdir -p '$ENV_DIR'"

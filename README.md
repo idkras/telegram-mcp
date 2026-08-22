@@ -24,7 +24,7 @@ pip install -r requirements.txt
 #### Для профиля lisa
 
 Зарегистрируйте logical ids `lisa_tg_api_key`, `lisa_tg_app_hash`,
-`lisa_tg_session` через `heroes_platform.credentials`; backend выбирается
+`lisa_tg_session` через `credentials_registry`; backend выбирается
 метаданными registry.
 
 #### Для профиля ik
@@ -81,7 +81,7 @@ chat_info = await get_chat(chat_id)
     "telegram-mcp": {
       "command": "${workspaceFolder}/.venv/bin/python",
       "args": [
-        "-m", "heroes_platform.credentials.service_env",
+        "-m", "credentials_registry.service_env",
         "telegram",
         "${workspaceFolder}/.venv/bin/python",
         "${workspaceFolder}/heroes_platform/heroes_telegram_mcp/main.py"

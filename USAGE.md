@@ -15,7 +15,7 @@ Telegram MCP поддерживает работу с двумя пользов�
   "telegram-mcp": {
     "command": "${workspaceFolder}/.venv/bin/python",
     "args": [
-      "-m", "heroes_platform.credentials.service_env",
+      "-m", "credentials_registry.service_env",
       "telegram",
       "${workspaceFolder}/.venv/bin/python",
       "${workspaceFolder}/heroes_platform/heroes_telegram_mcp/main.py"

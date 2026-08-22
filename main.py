@@ -93,7 +93,7 @@ from heroes_platform.shared.import_setup import enable
 enable(__file__)
 
 # ПОТОМ импортируем heroes_platform модули
-from heroes_platform.credentials.service_env import get_service_credentials
+from credentials_registry.service_env import get_service_credentials
 from heroes_platform.shared.logging_utils import add_rotating_file_handler
 
 # Honest CLI-probe helpers (pr-hero-i5i R2). Pure, dependency-free module next to

@@ -12,7 +12,7 @@ Architecture:
     - Logs ingest runs to telegram_ingest_runs with telegram_user_id scope
     - Dedup via unique index on (chat_id, message_id)
 
-Credentials: registry-only API via heroes_platform.credentials (supabase_rick_api_key)
+Credentials: registry-only API via credentials_registry (supabase_rick_api_key)
 Migration: 20250110000001_telegram_tdlib_tables.sql (must be applied first)
 """
 
@@ -160,7 +160,7 @@ def _get_postgres_url() -> str | None:
     for schema rick_messages_tasks (Exposed schemas not required).
     """
     try:
-        from heroes_platform.credentials import credentials_manager
+        from credentials_registry import credentials_manager
 
         result = credentials_manager.get_credential("supabase_rick_db_url")
         if result.success and result.value:
@@ -183,7 +183,7 @@ def _get_supabase_client() -> Any:
 
     api_key = None
     try:
-        from heroes_platform.credentials import credentials_manager
+        from credentials_registry import credentials_manager
 
         result = credentials_manager.get_credential("supabase_rick_api_key")
         if result.success and result.value:

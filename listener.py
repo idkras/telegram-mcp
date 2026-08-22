@@ -10,7 +10,7 @@ import sys
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
-from heroes_platform.credentials.service_env import get_service_credentials
+from credentials_registry.service_env import get_service_credentials
 from heroes_platform.heroes_telegram_mcp.event_handlers import register_event_handlers
 
 

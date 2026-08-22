@@ -9,8 +9,7 @@ JTBD: Как разработчик, я хочу создавать Telegram с�
 📚 CODEBASE REFERENCES:
 - heroes_platform/heroes_telegram_mcp/scripts/update_session.py - пример для default профиля (ikrasinsky)
 - heroes_platform/heroes_telegram_mcp/scripts/connect_rick_coposlly_linkedinhero.py - пример для rick-coposlly-linkedinhero
-- heroes_platform/credentials/ - registry-only credential API
-- heroes_platform/credentials/service_env.py - маппинг профилей на credential names
+- credentials_registry - registry-only credential API and profile relations
 - heroes_platform/heroes_telegram_mcp/PROFILE_MANAGEMENT.md - документация по профилям
 
 TDD Documentation Standard v2.5 Compliance:
@@ -30,7 +29,8 @@ heroes_platform_path = Path(__file__).parent.parent.parent
 if str(heroes_platform_path) not in sys.path:
     sys.path.insert(0, str(heroes_platform_path))
 
-from heroes_platform.credentials import credentials_manager  # type: ignore
+from credentials_registry import credentials_manager  # type: ignore
+from credentials_registry.registry import load_service_profiles  # type: ignore
 from telethon import TelegramClient  # type: ignore
 from telethon.sessions import StringSession  # type: ignore
 import telethon.errors.rpcerrorlist  # type: ignore
@@ -51,50 +51,14 @@ def _sent_code_type_name(sent_code_type: object) -> str:
 
 # ── Profile → credential-name resolution (universal, config-driven) ──
 #
-# Generalization-first gate (AGENTS.md): добавление НОВОГО клиента обязано быть
-# правкой config/Keychain, НЕ правкой Python-кода (Q4 = YES). Поэтому:
-#   1. Профили с исторически непоследовательными именами logical IDs
-#      (lisa: api_key/app_hash; default/ik: telegram_*) — в явной
-#      _PROFILE_OVERRIDES таблице. Physical account/target задаёт registry.
-#   2. Любой НОВЫЙ профиль резолвится по конвенции {slug}_tg_{field} —
-#      zero code change, но только если все имена заранее объявлены в
-#      credentials_registry.yaml. Прямая запись в Keychain/Windows запрещена.
+# Generalization-first gate: a new profile is a registry-only change. Python
+# contains only human-name aliases; every credential ID and semantic role is in
+# service_profiles.telegram:* inside credentials_registry.yaml.
 
 _PROFILE_ALIASES: dict[str, str] = {
     "ilyakrasinsky": "ikrasinsky",
     "ik": "ikrasinsky",
 }
-
-# Канонический набор полей. None = у профиля нет такого ключа.
-_PROFILE_OVERRIDES: dict[str, dict[str, Optional[str]]] = {
-    "lisa": {
-        "api_id": "lisa_tg_api_key",
-        "api_hash": "lisa_tg_app_hash",
-        "session": "lisa_tg_session",
-        "phone": "lisa_tg_phone",
-        "2fa_password": "lisa_tg_2fa_password",
-    },
-    "ikrasinsky": {
-        "api_id": "telegram_api_id",
-        "api_hash": "telegram_api_hash",
-        "session": "telegram_session",
-        "phone": "telegram_phone",
-    },
-    "rick-coposlly-linkedinhero": {
-        "api_id": "rick_coposlly_linkedinhero_api_id",
-        "api_hash": "rick_coposlly_linkedinhero_api_hash",
-        "session": "rick_coposlly_linkedinhero_session",
-        "phone": "rick_coposlly_linkedinhero_phone",
-    },
-    # default / "" → исторические telegram_* ключи (ikrasinsky legacy fallback)
-    "default": {
-        "api_id": "telegram_api_id",
-        "api_hash": "telegram_api_hash",
-        "session": "telegram_session",
-        "phone": None,
-    },
-}
-
 
 def _slugify_profile(profile: str) -> str:
     """Normalize an arbitrary profile/client name to a safe snake_case slug.
@@ -112,19 +76,17 @@ def _slugify_profile(profile: str) -> str:
 def get_profile_credential_names(profile: str) -> dict[str, Optional[str]]:
     """Get credential names for a Telegram profile (universal, config-driven).
 
-    📚 SEE: heroes_platform/credentials/service_env.py for profile mapping logic
+    The complete mapping is stored in credentials_registry.yaml service_profiles.
 
     ⚠️ Контракт безопасности (security review 2026-06-01): `profile` ОБЯЗАН
     приходить из доверенного источника (operator-config / TELEGRAM_USER env),
     НЕ из сетевого ввода без allowlist — иначе вызов с profile="lisa" вернёт
-    реальные ключи Лизы (cross-account session read). Имена в _PROFILE_OVERRIDES
+    реальные ключи Лизы (cross-account session read). Имена registry profiles
     зарезервированы и не могут переиспользоваться для новых клиентов без миграции.
 
     Args:
-        profile: Profile/client name. Легаси (ikrasinsky/lisa/rick-coposlly-linkedinhero/
-            default) резолвятся через _PROFILE_OVERRIDES (backward compatible);
-            новый клиент — по конвенции {slug}_tg_{field}, только после
-            объявления всех logical IDs в credentials registry.
+        profile: Profile/client name. Every supported profile and role is declared
+            under service_profiles.telegram:* in the credentials registry.
 
     Returns:
         dict with credential names: api_id, api_hash, session, phone, 2fa_password.
@@ -140,32 +102,21 @@ def get_profile_credential_names(profile: str) -> dict[str, Optional[str]]:
         normalized = "default"
 
     key = _PROFILE_ALIASES.get(normalized, normalized)
-    if key in _PROFILE_OVERRIDES:
-        return dict(_PROFILE_OVERRIDES[key])
-
-    # Универсальная конвенция — НОВЫЙ клиент без правки кода.
-    slug = _slugify_profile(profile)
+    slug = _slugify_profile(key)
     if not slug:
         raise ValueError(
             f"Cannot derive a safe Keychain slug from profile {profile!r} "
             "(empty after normalization — whitespace/symbols/non-latin only). "
-            "Use a latin-alphanumeric profile name or add an explicit "
-            "_PROFILE_OVERRIDES entry."
+            "Use a latin-alphanumeric profile name and declare a telegram service profile."
         )
-    generated = {
-        "api_id": f"{slug}_tg_api_id",
-        "api_hash": f"{slug}_tg_api_hash",
-        "session": f"{slug}_tg_session",
-        "phone": f"{slug}_tg_phone",
-        "2fa_password": f"{slug}_tg_2fa_password",
-    }
-    missing = sorted(name for name in generated.values() if name not in credentials_manager._configs)
-    if missing:
+    profiles = load_service_profiles()
+    profile_data = profiles.get(f"telegram:{key}") or profiles.get(f"telegram:{slug}")
+    if not profile_data or not profile_data.get("credential_roles"):
         raise ValueError(
-            "Telegram profile has undeclared credential IDs: " + ", ".join(missing)
-            + "; declare them in credentials_registry.yaml before use"
+            f"Telegram profile {slug!r} is undeclared; add credential_ids and credential_roles "
+            "to credentials_registry.yaml before use"
         )
-    return generated
+    return dict(profile_data["credential_roles"])
 
 
 async def create_telegram_session(
