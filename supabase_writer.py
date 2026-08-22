@@ -28,7 +28,7 @@ from typing import Any, Iterator
 
 logger = logging.getLogger(__name__)
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://supabase.rick.ai")
+SUPABASE_URL = "https://supabase.rick.ai"
 
 # ── Schema-per-profile resolution (RCA 2026-06-05, owner directive) ──
 #
@@ -182,12 +182,16 @@ def _get_supabase_client() -> Any:
     from supabase import create_client  # type: ignore
 
     api_key = None
+    api_url = None
     try:
         from credentials_registry import credentials_manager
 
         result = credentials_manager.get_credential("supabase_rick_api_key")
         if result.success and result.value:
             api_key = result.value
+        url_result = credentials_manager.get_credential("supabase_rick_api_url")
+        if url_result.success and url_result.value:
+            api_url = url_result.value
     except ImportError:
         pass
 
@@ -196,8 +200,7 @@ def _get_supabase_client() -> Any:
             "Supabase API key not found through registry id 'supabase_rick_api_key'."
         )
 
-    url = os.getenv("SUPABASE_URL", SUPABASE_URL)
-    return create_client(url, api_key)
+    return create_client(api_url or SUPABASE_URL, api_key)
 
 
 class SupabaseWriter:
