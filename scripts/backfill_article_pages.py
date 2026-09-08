@@ -53,13 +53,10 @@ FLOOD_WAIT_MAX_SLEEP_BACKFILL = 120
 
 
 def _postgres_url() -> str:
-    url = os.getenv("SUPABASE_DB_URL")
-    if url:
-        return url
     try:
-        from heroes_platform.shared.credentials_manager import credentials_manager
+        from credentials_registry import CredentialsManager
 
-        result = credentials_manager.get_credential("supabase_rick_db_url")
+        result = CredentialsManager().get_credential("supabase_rick_db_url")
         if result.success and result.value:
             return str(result.value)
     except Exception:  # noqa: BLE001
@@ -182,7 +179,7 @@ async def backfill_fetch(
     from telethon import TelegramClient  # type: ignore
     from telethon.sessions import StringSession  # type: ignore
 
-    from heroes_platform.shared.credentials_wrapper import get_service_credentials
+    from credentials_registry.service_env import get_service_credentials
 
     creds = get_service_credentials("telegram")
     if not creds:

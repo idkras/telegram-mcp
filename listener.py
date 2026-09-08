@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Long-lived Telegram-to-Supabase listener for systemd deployments."""
+"""Single-owner Telegram listener plus optional HTTP MCP for systemd.
+
+One process owns one profile's Telethon session.  In streamable-http mode the
+same connected client serves MCP tools and ingestion handlers, so exposing an
+interactive endpoint never creates a second session connection.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +15,7 @@ import sys
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
-from heroes_platform.credentials.service_env import get_service_credentials
+from credentials_registry.service_env import get_service_credentials
 from heroes_platform.heroes_telegram_mcp.event_handlers import register_event_handlers
 
 
@@ -37,7 +42,23 @@ async def run_listener() -> None:
         identity = getattr(me, "username", None) or getattr(me, "id", "unknown")
         print(f"Telegram listener authorized as {identity} ({profile})", file=sys.stderr)
         register_event_handlers(client)
-        await client.run_until_disconnected()
+        transport = os.getenv("TELEGRAM_MCP_TRANSPORT", "listener").strip().lower()
+        if transport == "streamable-http":
+            # Import after the primary client is authorized.  main.py registers
+            # the canonical MCP tools; replacing its unconnected bootstrap
+            # client keeps every tool on this process's single session owner.
+            from heroes_platform.heroes_telegram_mcp import main as telegram_mcp
+
+            telegram_mcp.client = client
+            print(
+                "Telegram MCP streamable-http ready "
+                f"on {telegram_mcp.MCP_HOST}:{telegram_mcp.MCP_PORT}{telegram_mcp.MCP_PATH} "
+                f"({profile})",
+                file=sys.stderr,
+            )
+            await telegram_mcp.mcp.run_streamable_http_async()
+        else:
+            await client.run_until_disconnected()
     finally:
         await client.disconnect()
 

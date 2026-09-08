@@ -6,8 +6,8 @@ Telegram Session Creator for Rick Coposlly LinkedinHero
 📚 CODEBASE REFERENCES:
 - heroes_platform/heroes_telegram_mcp/session_manager.py - универсальный модуль для создания сессий
 - heroes_platform/heroes_telegram_mcp/scripts/update_session.py - пример для default профиля
-- heroes_platform/credentials/ - registry-only credential API
-- heroes_platform/credentials/service_env.py - маппинг профилей
+- credentials_registry package - registry-only credential API
+- heroes_harness/credentials_registry.yaml :: service_profiles - единственный маппинг профилей
 
 JTBD: Как пользователь, я хочу подключиться к Telegram под аккаунтом rick-coposlly-linkedinhero,
 чтобы получить active session для работы через Telegram MCP.

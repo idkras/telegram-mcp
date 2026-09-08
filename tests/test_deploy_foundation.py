@@ -7,17 +7,20 @@ import subprocess
 import sys
 from pathlib import Path
 
-import yaml
-
 DEPLOY = Path(__file__).resolve().parents[1] / "deploy"
 TEMPLATE = DEPLOY / "telegram-mcp.service.template"
 SCRIPT = DEPLOY / "deploy-sandbox-ik.sh"
 
 
-def _render(profile="ikrasinsky", user="idkras", app="/home/idkras/telegram-mcp"):
+def _render(
+    profile="ikrasinsky",
+    user="idkras",
+    app="/home/idkras/telegram-mcp",
+    mcp_port="8766",
+):
     t = TEMPLATE.read_text()
     return (t.replace("__PROFILE__", profile).replace("__USER__", user)
-             .replace("__APP_DIR__", app))
+             .replace("__APP_DIR__", app).replace("__MCP_PORT__", mcp_port))
 
 
 def test_unit_renders_valid_systemd():
@@ -31,6 +34,16 @@ def test_unit_renders_valid_systemd():
     assert "SyslogIdentifier=telegram-mcp-ikrasinsky" in u  # journald, not /app/logs
     assert "Restart=on-failure" in u
     assert "TimeoutStopSec" in u                             # graceful shutdown
+    assert "TELEGRAM_MCP_TRANSPORT=streamable-http" in u
+    assert "TELEGRAM_MCP_HOST=127.0.0.1" in u
+    assert "TELEGRAM_MCP_PORT=8766" in u
+    assert "DEEP_BACKFILL_IN_LISTENER=false" in u
+    assert "BACKFILL_ON_STARTUP=true" in u
+    assert "DEEP_BACKFILL_DEACTIVATE_UNRESOLVED=true" in u
+    assert "DEEP_BACKFILL_STARTUP_MAX_PASSES=200" in u
+    assert "TELEGRAM_PG_POOL_MIN=1" in u
+    assert "TELEGRAM_PG_POOL_MAX=2" in u
+    assert "Alias=telegram-mcp-ikrasinsky-remote.service" in u
 
 
 def test_unit_no_unrendered_placeholders():
@@ -76,74 +89,40 @@ def test_env_example_has_required_keys_and_no_secrets():
             assert line.strip() == "TELEGRAM_SESSION_STRING="  # empty, filled on VPS
 
 
-def test_deploy_installs_declared_dependencies_and_standalone_adapter():
+def test_deploy_requires_canonical_harness_credential_runtime():
     script = SCRIPT.read_text()
     assert "-r '$APP_DIR/requirements.txt' -r '$APP_DIR/requirements-laba.txt'" in script
-    assert "deploy/standalone/heroes_platform" in script
+    assert "import credentials_registry" in script
+    assert "deploy through Heroes Harness" in script
     standalone = DEPLOY / "standalone"
     for rel in (
-        "heroes_harness/credentials_registry.yaml",
-        "heroes_platform/credentials/__init__.py",
+        "heroes_harness/credentials_registry.yaml", "heroes_platform/credentials/__init__.py",
         "heroes_platform/credentials/service_env.py",
-        "heroes_platform/shared/import_setup.py",
-        "heroes_platform/shared/logging_utils.py",
     ):
-        assert (standalone / rel).is_file(), rel
+        assert not (standalone / rel).exists(), rel
     assert not (standalone / "heroes_platform/shared/credentials_wrapper.py").exists()
 
-    assert "telegram-mcp-backfill@.service" in script
-    assert "telegram-mcp-backfill@${p}.timer" in script
-
-
-def test_standalone_registry_declares_every_listener_secret_id_and_rejects_unknown() -> None:
-    registry = DEPLOY / "standalone/heroes_harness/credentials_registry.yaml"
-    document = yaml.safe_load(registry.read_text(encoding="utf-8"))
-    assert document["profile"] == "telegram-mcp-standalone"
-    assert document["count"] == len(document["entries"])
-    declared = {item["id"] for item in document["entries"]}
-    assert {
-        "telegram_api_id",
-        "telegram_api_hash",
-        "telegram_session",
-        "supabase_rick_db_url",
-        "supabase_rick_api_key",
-    } <= declared
-    aliases = {alias for item in document["entries"] for alias in item.get("env_aliases", [])}
-    assert {"SUPABASE_DB_URL", "SUPABASE_API_KEY"} <= aliases
-    standalone = DEPLOY / "standalone"
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(standalone)
-    env["HEROES_CREDENTIALS_REGISTRY"] = str(registry)
-    env["TELEGRAM_USER"] = "ikrasinsky"
-    env["TELEGRAM_API_ID"] = "12345"
-    env["TELEGRAM_API_HASH"] = "a" * 32
-    env["TELEGRAM_SESSION_STRING"] = "test-session"
-    probe = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "from heroes_platform.credentials import credentials_manager; "
-            "from heroes_platform.credentials.service_env import get_service_credentials; "
-            "known=get_service_credentials('telegram'); "
-            "r=credentials_manager.get_credential('undeclared_partner_secret'); "
-            "raise SystemExit(0 if known['TELEGRAM_API_ID']=='12345' "
-            "and known['TELEGRAM_SESSION_STRING']=='test-session' "
-            "and not r.success and r.source is None else 1)",
-        ],
-        env=env,
-        cwd=standalone,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert probe.returncode == 0, probe.stderr
+    assert "reset --hard" not in script
+    assert "merge --ff-only origin/main" in script
+    assert "disable --now telegram-mcp-backfill@${p}.timer" in script
 
 
 def test_listener_entrypoint_is_noninteractive_and_long_lived():
     listener = (DEPLOY.parent / "listener.py").read_text()
     assert "run_until_disconnected" in listener
+    assert "run_streamable_http_async" in listener
+    assert "telegram_mcp.client = client" in listener
     assert "input(" not in listener
     assert "getpass" not in listener
+
+
+def test_listener_forward_reconciliation_is_recent_and_bounded():
+    unit = (DEPLOY / "telegram-mcp.service.template").read_text()
+    assert "BACKFILL_ON_STARTUP=true" in unit
+    assert "BACKFILL_PERIODIC_INTERVAL_SECONDS=3600" in unit
+    assert "BACKFILL_PERIODIC_DIALOG_LIMIT=500" in unit
+    assert "BACKFILL_STARTUP_DIALOG_LIMIT=1000" in unit
+    assert "BACKFILL_RECENT_LOOKBACK_SECONDS=21600" in unit
 
 
 def test_backfill_timer_is_bounded_and_resumable():
@@ -161,6 +140,18 @@ def test_backfill_timer_is_bounded_and_resumable():
     cli = (DEPLOY.parent / "scripts" / "deep_backfill_history.py").read_text()
     assert "get_dialogs(limit=entity_cache_limit)" in cli
     assert '"--entity-cache-dialog-limit"' in cli
+
+
+def test_main_http_endpoint_is_profile_pinned_and_loopback_by_default():
+    main = (DEPLOY.parent / "main.py").read_text()
+    assert 'os.getenv("TELEGRAM_MCP_HOST", "127.0.0.1")' in main
+    assert 'os.getenv("TELEGRAM_MCP_SINGLE_PROFILE", "false")' in main
+    assert "This endpoint is pinned to profile=" in main
+
+
+def test_listener_boot_marker_cannot_block_mcp_event_loop():
+    handlers = (DEPLOY.parent / "event_handlers.py").read_text()
+    assert "await asyncio.to_thread(_write_marker)" in handlers
 
 
 def test_rce_injection_via_profiles_refused():

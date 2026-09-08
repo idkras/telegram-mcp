@@ -62,18 +62,18 @@ def test_rick_coposlly_keys_unchanged():
 
 
 @pytest.mark.parametrize("profile", ["default", "", "DEFAULT"])
-def test_default_profile_keys_unchanged(profile):
+def test_default_profile_uses_declared_registry_keys(profile):
     names = get_profile_credential_names(profile)
     assert names["api_id"] == "telegram_api_id"
     assert names["api_hash"] == "telegram_api_hash"
     assert names["session"] == "telegram_session"
-    assert names["phone"] is None
+    assert names["phone"] == "telegram_phone"
 
 
 # ── Universal convention: НОВЫЙ клиент = zero code change ──
 
 def test_new_client_requires_registry_declaration():
-    with pytest.raises(ValueError, match="undeclared credential IDs"):
+    with pytest.raises(ValueError, match="profile 'acme' is undeclared"):
         get_profile_credential_names("acme")
 
 
@@ -87,14 +87,9 @@ def test_new_client_requires_registry_declaration():
     ],
 )
 def test_new_client_slug_normalization(raw, slug):
-    """Дефисы / точки / пробелы / регистр дают безопасный, но незарегистрированный slug."""
-    with pytest.raises(ValueError, match=f"{slug}_tg_session"):
+    """Дефисы / точки / пробелы / регистр дают безопасный registry profile slug."""
+    with pytest.raises(ValueError, match=rf"profile '{slug}' is undeclared"):
         get_profile_credential_names(raw)
-
-
-def test_convention_keys_are_complete():
-    with pytest.raises(ValueError, match="brandnew_tg_2fa_password"):
-        get_profile_credential_names("brandnew")
 
 
 def test_returns_fresh_dict_each_call():
@@ -122,18 +117,16 @@ def test_non_latin_or_symbols_only_raises(bad):
         get_profile_credential_names(bad)
 
 
-def test_override_source_table_not_mutated():
-    """Мутация возвращённого dict не должна затронуть _PROFILE_OVERRIDES (source)."""
-    from heroes_platform.heroes_telegram_mcp.session_manager import _PROFILE_OVERRIDES
-
+def test_registry_profile_source_not_mutated():
+    """Мутация результата не должна затронуть registry profile source."""
     got = get_profile_credential_names("lisa")
     got["session"] = "HACKED"
-    assert _PROFILE_OVERRIDES["lisa"]["session"] == "lisa_tg_session"
+    assert get_profile_credential_names("lisa")["session"] == "lisa_tg_session"
 
 
 def test_slug_collision_is_by_design():
     for profile in ("my-client", "my_client", "My Client"):
-        with pytest.raises(ValueError, match="my_client_tg_session"):
+        with pytest.raises(ValueError, match="profile 'my_client' is undeclared"):
             get_profile_credential_names(profile)
 
 
@@ -143,14 +136,18 @@ def test_reserved_override_name_cannot_be_new_client():
     случайного переиспользования имени без миграции."""
     assert get_profile_credential_names("lisa")["session"] == "lisa_tg_session"
     # а вот 'lisa-skincare' (другое имя) уйдёт по конвенции — изоляция сохранена
-    with pytest.raises(ValueError, match="lisa_skincare_tg_session"):
+    with pytest.raises(ValueError, match="profile 'lisa_skincare' is undeclared"):
         get_profile_credential_names("lisa-skincare")
 
 
 def test_every_builtin_override_logical_id_is_in_canonical_registry():
-    from heroes_platform.heroes_telegram_mcp.session_manager import _PROFILE_OVERRIDES
-    from heroes_platform.credentials import CredentialsManager
+    from credentials_registry import CredentialsManager
+    from credentials_registry.registry import load_service_profiles
 
     registered = set(CredentialsManager()._configs)
-    generated = {name for fields in _PROFILE_OVERRIDES.values() for name in fields.values() if name}
+    generated = {
+        name for profile, data in load_service_profiles().items()
+        if profile.startswith("telegram:")
+        for name in data.get("credential_roles", {}).values() if name
+    }
     assert generated <= registered

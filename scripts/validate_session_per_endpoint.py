@@ -37,7 +37,7 @@ import re
 import sys
 from pathlib import Path
 
-from heroes_platform.credentials import credentials_manager
+from credentials_registry import credentials_manager
 
 ACK_ENV = "TG_SESSION_REUSE_ACK"
 ACK_MIN = 12

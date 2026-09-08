@@ -79,7 +79,7 @@ grep "🔑 Using TELEGRAM_USER" logs/mcp_errors.log
 
 ### **Check registered keys:**
 
-Проверяйте logical ids и доступность только через `heroes_platform.credentials`;
+Проверяйте logical ids и доступность только через `credentials_registry`;
 не перечисляйте backend напрямую.
 
 ### **Test Profile Manually:**
@@ -155,11 +155,10 @@ grep -A 5 "telegram-mcp" .cursor/mcp.json | grep "TELEGRAM_USER" || echo "Using 
 
 **📁 Configuration:**
 - `heroes_harness/credentials_registry.yaml` - конфигурация logical ids и backends
-- `heroes_platform/credentials/service_env.py` - маппинг профилей на credential names
+- `heroes_harness/credentials_registry.yaml :: service_profiles` - единственный маппинг профилей на credential IDs
 
 **💡 How to Create Session for New Profile:**
 1. Add credential metadata to `heroes_harness/credentials_registry.yaml`
-2. Add profile mapping to `heroes_platform.credentials.service_env.get_service_credentials()`
-3. Add credential names mapping to `session_manager.get_profile_credential_names()`
-4. Create script in `heroes_platform/heroes_telegram_mcp/scripts/` using `session_manager.create_telegram_session()`
-5. Update this documentation
+2. Add the profile and all roles/requirements/exports only to `heroes_harness/credentials_registry.yaml :: service_profiles`
+3. Create script in `heroes_platform/heroes_telegram_mcp/scripts/` using `session_manager.create_telegram_session()`
+4. Update this documentation
