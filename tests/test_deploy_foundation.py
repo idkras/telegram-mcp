@@ -38,7 +38,7 @@ def test_unit_renders_valid_systemd():
     assert "TELEGRAM_MCP_HOST=127.0.0.1" in u
     assert "TELEGRAM_MCP_PORT=8766" in u
     assert "DEEP_BACKFILL_IN_LISTENER=false" in u
-    assert "BACKFILL_ON_STARTUP=false" in u
+    assert "BACKFILL_ON_STARTUP=true" in u
     assert "DEEP_BACKFILL_DEACTIVATE_UNRESOLVED=true" in u
     assert "DEEP_BACKFILL_STARTUP_MAX_PASSES=200" in u
     assert "TELEGRAM_PG_POOL_MIN=1" in u
@@ -114,6 +114,15 @@ def test_listener_entrypoint_is_noninteractive_and_long_lived():
     assert "telegram_mcp.client = client" in listener
     assert "input(" not in listener
     assert "getpass" not in listener
+
+
+def test_listener_forward_reconciliation_is_recent_and_bounded():
+    unit = (DEPLOY / "telegram-mcp.service.template").read_text()
+    assert "BACKFILL_ON_STARTUP=true" in unit
+    assert "BACKFILL_PERIODIC_INTERVAL_SECONDS=3600" in unit
+    assert "BACKFILL_PERIODIC_DIALOG_LIMIT=500" in unit
+    assert "BACKFILL_STARTUP_DIALOG_LIMIT=1000" in unit
+    assert "BACKFILL_RECENT_LOOKBACK_SECONDS=21600" in unit
 
 
 def test_backfill_timer_is_bounded_and_resumable():

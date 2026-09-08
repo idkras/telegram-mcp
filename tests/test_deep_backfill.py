@@ -951,7 +951,7 @@ def test_touch_backfill_attempt_updates_timestamp_only():
     writer.schema = "tg_test"
     writer.telegram_user_id = "test_user"
     writer._postgres_url = "postgres://test"
-    writer._pg_conn = lambda: ConnContext()
+    writer._pg_conn = lambda **_kwargs: ConnContext()
     writer._ensure_chat_state_pg = lambda _conn, _chat_id: None
 
     assert run(writer.touch_backfill_attempt(123)) is True
@@ -992,7 +992,7 @@ def test_mark_chat_inactive_does_not_claim_backfill_completion():
     writer.schema = "tg_test"
     writer.telegram_user_id = "test_user"
     writer._postgres_url = "postgres://test"
-    writer._pg_conn = lambda: ConnContext()
+    writer._pg_conn = lambda **_kwargs: ConnContext()
     writer._ensure_chat_state_pg = lambda _conn, _chat_id: None
 
     assert run(writer.mark_chat_inactive(321)) is True

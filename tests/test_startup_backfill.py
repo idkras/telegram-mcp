@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 
 # Ensure heroes_platform is importable (same pattern as test_supabase_writer.py)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -39,8 +40,9 @@ def run(coro):
 
 # ── fakes ─────────────────────────────────────────────────────────────────────
 class FakeMsg:
-    def __init__(self, mid: int):
+    def __init__(self, mid: int, date=None):
         self.id = mid
+        self.date = date
 
 
 class FakeEntity:
@@ -50,9 +52,11 @@ class FakeEntity:
 
 
 class FakeDialog:
-    def __init__(self, did: int, entity=None):
+    def __init__(self, did: int, entity=None, message=None, pinned=False):
         self.id = did
         self.entity = entity
+        self.message = message
+        self.pinned = pinned
 
 
 class FloodWait(Exception):
@@ -78,10 +82,11 @@ class FakeClient:
             raise RuntimeError("AUTHKEY_DUPLICATED")
         return object()
 
-    async def iter_dialogs(self):
+    async def iter_dialogs(self, limit=None):
         if self._dialogs_raise is not None:
             raise self._dialogs_raise
-        for d in self._dialogs:
+        dialogs = self._dialogs if limit is None else self._dialogs[:limit]
+        for d in dialogs:
             yield d
 
     async def iter_messages(self, entity, limit=None, reverse=False):
@@ -113,11 +118,56 @@ class FakeWriter:
         self.cursor_updates = []
         self.catch_up_calls = []
         self.runtime_events = []  # (mode, processed_chats, inserted_messages)
+        self.cursor_reads = 0
+        self.bulk_cursor_reads = 0
+        self.reconciliation_snapshots = []
+        self.audit_missing_keys = set()
+        self.head_policy_skips = set()
+        self.head_classification_errors = set()
+        self.recent_accepted_keys = []
 
     async def get_chat_cursor(self, chat_id):
+        self.cursor_reads += 1
         return self._cursors.get(int(chat_id))
 
-    async def catch_up_recent(self, client, chat_id, chat_type="unknown", limit=1000):
+    async def get_chat_cursors(self):
+        self.bulk_cursor_reads += 1
+        return {str(chat_id): cursor for chat_id, cursor in self._cursors.items()}
+
+    async def audit_message_keys(self, keys, *, operation="reconcile_heads"):
+        normalized = [(str(chat_id), int(message_id)) for chat_id, message_id in keys]
+        missing = [key for key in normalized if key in self.audit_missing_keys]
+        return {
+            "available": True,
+            "checked": len(normalized),
+            "present": len(normalized) - len(missing),
+            "missing": len(missing),
+            "missing_keys_omitted": len(missing),
+        }
+
+    def get_recent_accepted_keys(self):
+        return list(self.recent_accepted_keys)
+
+    def set_reconciliation_snapshot(self, snapshot):
+        self.reconciliation_snapshots.append(dict(snapshot))
+
+    def classify_message_for_ingest(self, message, chat_id, chat_title=None):
+        normalized = (str(chat_id), int(message.id))
+        if normalized in self.head_classification_errors:
+            return {
+                "eligible": False,
+                "reason": "guard_error:RuntimeError",
+                "classification_error": True,
+            }
+        if normalized in self.head_policy_skips:
+            return {
+                "eligible": False,
+                "reason": "blacklisted_chat",
+                "classification_error": False,
+            }
+        return {"eligible": True, "reason": "eligible", "classification_error": False}
+
+    async def catch_up_recent(self, client, chat_id, chat_type="unknown", limit=1000, *, cursor=None):
         if int(chat_id) in self._fail_chats:
             raise RuntimeError("simulated catch_up failure")
         if int(chat_id) in self._flood_chats:
@@ -176,6 +226,24 @@ def test_chat_with_cursor_calls_catch_up():
     assert truncated is False
     assert writer.catch_up_calls == [(100, "private", 5000)]
     assert writer.written_batches == []
+
+
+def test_bulk_cursor_and_dialog_top_skip_unchanged_chat_without_history_request():
+    dialogs = [
+        FakeDialog(100, FakeEntity(first_name="A"), message=FakeMsg(50)),
+        FakeDialog(200, FakeEntity(first_name="B"), message=FakeMsg(55)),
+    ]
+    writer = FakeWriter(
+        cursors={100: {"last_seen_message_id": 50}, 200: {"last_seen_message_id": 50}},
+        catch_up_returns={200: 2},
+    )
+    result = run(backfill_all_chats(FakeClient(dialogs), writer))
+    assert writer.bulk_cursor_reads == 1
+    assert writer.cursor_reads == 0
+    assert writer.catch_up_calls == [(200, "private", 5000)]
+    assert result.chats_scanned == 2
+    assert result.chats_unchanged == 1
+    assert result.messages_written == 2
 
 
 # ── T2: chat WITHOUT cursor → _seed_recent writes + INCREMENTAL cursor (B1) ───
@@ -285,6 +353,145 @@ def test_dialog_limit():
     )
     res = run(backfill_all_chats(FakeClient(dialogs), writer, dialog_limit=2))
     assert res.chats_scanned == 2
+    assert res.budget_exhausted is True
+
+
+def test_recent_window_stops_after_cutoff_and_audits_exact_heads():
+    now = datetime.now(tz=timezone.utc)
+    dialogs = [
+        FakeDialog(1, FakeEntity(first_name="new"), FakeMsg(101, now - timedelta(minutes=5))),
+        FakeDialog(2, FakeEntity(first_name="newer"), FakeMsg(202, now - timedelta(hours=2))),
+        FakeDialog(3, FakeEntity(first_name="old"), FakeMsg(303, now - timedelta(hours=7))),
+        FakeDialog(4, FakeEntity(first_name="older"), FakeMsg(404, now - timedelta(days=1))),
+    ]
+    writer = FakeWriter(
+        cursors={1: {"last_seen_message_id": 101}, 2: {"last_seen_message_id": 202}}
+    )
+
+    res = run(
+        backfill_all_chats(
+            FakeClient(dialogs), writer, dialog_limit=500, lookback_seconds=6 * 3600
+        )
+    )
+
+    assert res.chats_scanned == 2
+    assert res.lookback_cutoff_reached is True
+    assert res.recent_scope_complete is True
+    assert res.budget_exhausted is False
+    assert res.audit_heads_checked == 2
+    assert res.audit_heads_present == 2
+    assert writer.reconciliation_snapshots[-1]["recent_scope_complete"] is True
+
+
+def test_recent_window_budget_exhaustion_is_visible_not_green():
+    now = datetime.now(tz=timezone.utc)
+    dialogs = [
+        FakeDialog(i, FakeEntity(first_name=str(i)), FakeMsg(i, now - timedelta(minutes=1)))
+        for i in range(1, 7)
+    ]
+    writer = FakeWriter(
+        cursors={i: {"last_seen_message_id": i} for i in range(1, 7)}
+    )
+
+    res = run(
+        backfill_all_chats(
+            FakeClient(dialogs), writer, dialog_limit=3, lookback_seconds=6 * 3600
+        )
+    )
+
+    assert res.chats_scanned == 3
+    assert res.budget_exhausted is True
+    assert res.recent_scope_complete is False
+    assert res.marker_mode("periodic") == "backfill_periodic_bounded"
+
+
+def test_exact_head_gap_makes_pass_partial():
+    now = datetime.now(tz=timezone.utc)
+    dialogs = [
+        FakeDialog(1, FakeEntity(first_name="new"), FakeMsg(101, now - timedelta(minutes=5))),
+        FakeDialog(2, FakeEntity(first_name="old"), FakeMsg(202, now - timedelta(hours=7))),
+    ]
+    writer = FakeWriter(cursors={1: {"last_seen_message_id": 101}})
+    writer.audit_missing_keys = {("1", 101)}
+
+    res = run(
+        backfill_all_chats(
+            FakeClient(dialogs), writer, dialog_limit=500, lookback_seconds=6 * 3600
+        )
+    )
+
+    assert res.audit_heads_missing == 1
+    assert res.marker_mode("periodic") == "backfill_periodic_partial"
+
+
+def test_policy_skipped_head_is_accounted_but_not_reported_as_data_loss():
+    now = datetime.now(tz=timezone.utc)
+    dialogs = [
+        FakeDialog(1, FakeEntity(first_name="relay"), FakeMsg(101, now - timedelta(minutes=5))),
+        FakeDialog(2, FakeEntity(first_name="old"), FakeMsg(202, now - timedelta(hours=7))),
+    ]
+    writer = FakeWriter(cursors={1: {"last_seen_message_id": 101}})
+    writer.head_policy_skips = {("1", 101)}
+
+    res = run(
+        backfill_all_chats(
+            FakeClient(dialogs), writer, dialog_limit=500, lookback_seconds=6 * 3600
+        )
+    )
+
+    assert res.audit_heads_checked == 0
+    assert res.audit_heads_missing == 0
+    assert res.audit_heads_skipped_policy == 1
+    assert res.audit_heads_classification_errors == 0
+    assert res.marker_mode("periodic") == "backfill_periodic_ok"
+    assert "skip_reasons" not in writer.reconciliation_snapshots[-1]
+
+
+def test_recent_accepted_key_gap_marks_pass_partial_without_exposing_keys():
+    now = datetime.now(tz=timezone.utc)
+    dialogs = [
+        FakeDialog(1, FakeEntity(first_name="A"), FakeMsg(101, now - timedelta(minutes=5))),
+        FakeDialog(2, FakeEntity(first_name="old"), FakeMsg(202, now - timedelta(hours=7))),
+    ]
+    writer = FakeWriter(cursors={1: {"last_seen_message_id": 101}})
+    writer.recent_accepted_keys = [("9", 909)]
+    writer.audit_missing_keys = {("9", 909)}
+
+    res = run(
+        backfill_all_chats(
+            FakeClient(dialogs), writer, dialog_limit=500, lookback_seconds=6 * 3600
+        )
+    )
+
+    assert res.audit_accepted_checked == 1
+    assert res.audit_accepted_present == 0
+    assert res.audit_accepted_missing == 1
+    assert res.marker_mode("periodic") == "backfill_periodic_partial"
+    snapshot = writer.reconciliation_snapshots[-1]
+    assert snapshot["audit_key_scope"] == "dialog_heads_and_recent_accepted"
+    assert snapshot["accepted_missing"] == 1
+    assert "missing_keys" not in snapshot
+
+
+def test_guard_error_is_fail_closed_and_keeps_pass_partial():
+    now = datetime.now(tz=timezone.utc)
+    dialogs = [
+        FakeDialog(1, FakeEntity(first_name="broken"), FakeMsg(101, now - timedelta(minutes=5))),
+        FakeDialog(2, FakeEntity(first_name="old"), FakeMsg(202, now - timedelta(hours=7))),
+    ]
+    writer = FakeWriter(cursors={1: {"last_seen_message_id": 101}})
+    writer.head_classification_errors = {("1", 101)}
+
+    res = run(
+        backfill_all_chats(
+            FakeClient(dialogs), writer, dialog_limit=500, lookback_seconds=6 * 3600
+        )
+    )
+
+    assert res.audit_heads_checked == 0
+    assert res.audit_heads_skipped_policy == 1
+    assert res.audit_heads_classification_errors == 1
+    assert res.marker_mode("periodic") == "backfill_periodic_partial"
 
 
 def test_skip_empty_chat_id():
@@ -352,7 +559,11 @@ def test_marker_mode_session_dead():
 
 # ── T8: universal — telegram_user_id passthrough + ok-marker ──────────────────
 def test_universal_user_id_passthrough():
-    dialogs = [FakeDialog(1, FakeEntity(first_name="A"))]
+    now = datetime.now(tz=timezone.utc)
+    dialogs = [
+        FakeDialog(1, FakeEntity(first_name="A"), FakeMsg(2, now)),
+        FakeDialog(2, FakeEntity(first_name="old"), FakeMsg(1, now - timedelta(days=1))),
+    ]
     writer = FakeWriter(
         cursors={1: {"last_seen_message_id": 1}},
         catch_up_returns={1: 2},

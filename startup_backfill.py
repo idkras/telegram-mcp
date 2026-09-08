@@ -49,7 +49,9 @@ Non-goals (честно — чтобы владелец не считал что
     BACKFILL_ON_STARTUP=true                  — гонять backfill при старте (LABA_MODE)
     BACKFILL_PER_CHAT_LIMIT=5000              — макс. сообщений за catch_up одного чата
     BACKFILL_NO_CURSOR_SEED_LIMIT=1000        — последних сообщений для нового чата
-    BACKFILL_DIALOG_LIMIT=0                   — 0 = все диалоги; N>0 = staged rollout
+    BACKFILL_STARTUP_DIALOG_LIMIT=1000        — max dialogs checked after restart
+    BACKFILL_PERIODIC_DIALOG_LIMIT=500        — max recent dialogs per hourly pass
+    BACKFILL_RECENT_LOOKBACK_SECONDS=21600    — prove a six-hour recent window
     BACKFILL_PERIODIC_INTERVAL_SECONDS=3600   — повтор каждые N сек; 0 = выключить
     BACKFILL_FLOOD_WAIT_MAX_SECONDS=300       — макс. сон по FloodWaitError (иначе skip)
 """
@@ -60,6 +62,7 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -102,6 +105,21 @@ class BackfillResult:
     chats_failed: int = 0
     seed_truncated_chats: int = 0  # новый чат, где упёрлись в seed_limit (история обрезана)
     session_dead: bool = False  # pre-flight liveness провалился — ничего не догнали
+    dialog_limit: int = 0
+    lookback_seconds: int = 0
+    lookback_cutoff_reached: bool = False
+    budget_exhausted: bool = False
+    audit_available: bool = False
+    audit_heads_checked: int = 0
+    audit_heads_present: int = 0
+    audit_heads_missing: int = 0
+    audit_heads_skipped_policy: int = 0
+    audit_heads_classification_errors: int = 0
+    audit_accepted_checked: int = 0
+    audit_accepted_present: int = 0
+    audit_accepted_missing: int = 0
+    audit_skip_reasons: dict[str, int] = field(default_factory=dict)
+    audit_error: str = ""
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -112,9 +130,20 @@ class BackfillResult:
         """Раздельный health-маркер: _session_dead / _partial / _ok."""
         if self.session_dead:
             return f"backfill_{phase}_session_dead"
-        if self.chats_failed > 0:
+        if (
+            self.chats_failed > 0
+            or self.audit_heads_missing > 0
+            or self.audit_accepted_missing > 0
+            or self.audit_heads_classification_errors > 0
+        ):
             return f"backfill_{phase}_partial"
+        if self.lookback_seconds > 0 and not self.lookback_cutoff_reached:
+            return f"backfill_{phase}_bounded"
         return f"backfill_{phase}_ok"
+
+    @property
+    def recent_scope_complete(self) -> bool:
+        return self.lookback_seconds > 0 and self.lookback_cutoff_reached
 
     def merge_chat(self, written: int, *, truncated: bool = False) -> None:
         self.chats_scanned += 1
@@ -259,6 +288,7 @@ async def backfill_one_chat(
     *,
     per_chat_limit: int,
     seed_limit: int,
+    cursor: dict[str, Any] | None = None,
 ) -> tuple[int, bool]:
     """Догнать один чат. Курсор есть → catch_up_recent (только новее курсора);
     нет → _seed_recent. FloodWaitError → sleep + один retry. Возвращает
@@ -266,10 +296,14 @@ async def backfill_one_chat(
     flood_max = _env_int("BACKFILL_FLOOD_WAIT_MAX_SECONDS", 300)
 
     async def _do() -> tuple[int, bool]:
-        cursor = await writer.get_chat_cursor(chat_id)
-        if cursor and cursor.get("last_seen_message_id"):
+        selected_cursor = cursor if cursor is not None else await writer.get_chat_cursor(chat_id)
+        if selected_cursor and selected_cursor.get("last_seen_message_id"):
             written = await writer.catch_up_recent(
-                client, chat_id, chat_type, limit=per_chat_limit
+                client,
+                chat_id,
+                chat_type,
+                limit=per_chat_limit,
+                cursor=selected_cursor,
             )
             return written, False
         return await _seed_recent(client, writer, chat_id, chat_type, limit=seed_limit)
@@ -293,6 +327,7 @@ async def backfill_all_chats(
     dialog_limit: int = 0,
     per_chat_limit: int | None = None,
     seed_limit: int | None = None,
+    lookback_seconds: int = 0,
 ) -> BackfillResult:
     """Пройти по всем диалогам и догнать каждый. iter_dialogs обёрнут в try —
     мёртвая сессия/disconnect посреди прохода даёт partial result, а не silent
@@ -302,18 +337,76 @@ async def backfill_all_chats(
     if seed_limit is None:
         seed_limit = _env_int("BACKFILL_NO_CURSOR_SEED_LIMIT", 1000)
 
-    result = BackfillResult()
+    dialog_limit = max(0, int(dialog_limit or 0))
+    lookback_seconds = max(0, int(lookback_seconds or 0))
+    result = BackfillResult(dialog_limit=dialog_limit, lookback_seconds=lookback_seconds)
     scanned = 0
+    head_keys: list[tuple[str, int]] = []
+    cutoff = (
+        datetime.now(tz=timezone.utc) - timedelta(seconds=lookback_seconds)
+        if lookback_seconds > 0
+        else None
+    )
+    cursor_by_chat: dict[str, dict[str, Any]] | None = None
+    bulk_loader = getattr(writer, "get_chat_cursors", None)
+    if callable(bulk_loader):
+        try:
+            cursor_by_chat = await bulk_loader()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Bulk cursor load failed; using safe per-chat fallback: %s", exc)
     try:
-        async for dialog in client.iter_dialogs():
+        async for dialog in client.iter_dialogs(limit=dialog_limit or None):
             if dialog_limit and scanned >= dialog_limit:
                 break
-            scanned += 1
             chat_id = getattr(dialog, "id", None)
             if chat_id in (None, 0):
                 logger.warning("Skipping dialog with empty chat_id: %r", dialog)
                 continue
             chat_type = _chat_type_from_dialog(dialog)
+            cursor = cursor_by_chat.get(str(chat_id)) if cursor_by_chat is not None else None
+            latest_message = getattr(dialog, "message", None)
+            latest_message_id = getattr(latest_message, "id", None)
+            latest_message_date = getattr(latest_message, "date", None)
+            if (
+                cutoff is not None
+                and latest_message_date is not None
+                and not bool(getattr(dialog, "pinned", False))
+            ):
+                if latest_message_date.tzinfo is None:
+                    latest_message_date = latest_message_date.replace(tzinfo=timezone.utc)
+                if latest_message_date < cutoff:
+                    result.lookback_cutoff_reached = True
+                    break
+            scanned += 1
+            if latest_message_id is not None:
+                classifier = getattr(writer, "classify_message_for_ingest", None)
+                classification = (
+                    classifier(
+                        latest_message,
+                        chat_id,
+                        getattr(dialog, "name", None),
+                    )
+                    if callable(classifier)
+                    else {"eligible": True, "reason": "classifier_unavailable"}
+                )
+                if classification.get("eligible"):
+                    head_keys.append((str(chat_id), int(latest_message_id)))
+                else:
+                    reason = "guard_error" if classification.get("classification_error") else "policy_skip"
+                    result.audit_heads_skipped_policy += 1
+                    result.audit_skip_reasons[reason] = (
+                        result.audit_skip_reasons.get(reason, 0) + 1
+                    )
+                    if classification.get("classification_error"):
+                        result.audit_heads_classification_errors += 1
+            if (
+                cursor
+                and cursor.get("last_seen_message_id")
+                and latest_message_id is not None
+                and int(latest_message_id) <= int(cursor["last_seen_message_id"])
+            ):
+                result.merge_chat(0)
+                continue
             try:
                 written, truncated = await backfill_one_chat(
                     client,
@@ -322,6 +415,7 @@ async def backfill_all_chats(
                     chat_type,
                     per_chat_limit=per_chat_limit,
                     seed_limit=seed_limit,
+                    cursor=cursor,
                 )
                 result.merge_chat(written, truncated=truncated)
                 if truncated:
@@ -337,6 +431,50 @@ async def backfill_all_chats(
         logger.warning("Dialog iteration aborted: %s", exc)
         result.errors.append(f"iter_dialogs: {type(exc).__name__}: {exc}")
         result.session_dead = True
+    result.budget_exhausted = bool(
+        dialog_limit and scanned >= dialog_limit and not result.lookback_cutoff_reached
+    )
+
+    auditor = getattr(writer, "audit_message_keys", None)
+    if callable(auditor):
+        audit = await auditor(head_keys)
+        result.audit_available = bool(audit.get("available"))
+        result.audit_heads_checked = int(audit.get("checked") or 0)
+        result.audit_heads_present = int(audit.get("present") or 0)
+        result.audit_heads_missing = int(audit.get("missing") or 0)
+        result.audit_error = str(audit.get("reason") or "")
+        accepted_audit = {
+            "available": True,
+            "checked": 0,
+            "present": 0,
+            "missing": 0,
+        }
+        accepted_keys_reader = getattr(writer, "get_recent_accepted_keys", None)
+        if callable(accepted_keys_reader):
+            accepted_keys = accepted_keys_reader()
+            accepted_audit = await auditor(accepted_keys, operation="reconcile_accepted")
+            result.audit_accepted_checked = int(accepted_audit.get("checked") or 0)
+            result.audit_accepted_present = int(accepted_audit.get("present") or 0)
+            result.audit_accepted_missing = int(accepted_audit.get("missing") or 0)
+        snapshot = {
+            **audit,
+            "dialog_limit": result.dialog_limit,
+            "dialogs_scanned": result.chats_scanned,
+            "lookback_seconds": result.lookback_seconds,
+            "lookback_cutoff_reached": result.lookback_cutoff_reached,
+            "budget_exhausted": result.budget_exhausted,
+            "recent_scope_complete": result.recent_scope_complete,
+            "skipped_policy": result.audit_heads_skipped_policy,
+            "classification_errors": result.audit_heads_classification_errors,
+            "accepted_checked": result.audit_accepted_checked,
+            "accepted_present": result.audit_accepted_present,
+            "accepted_missing": result.audit_accepted_missing,
+            "accepted_audit_available": bool(accepted_audit.get("available")),
+            "audit_key_scope": "dialog_heads_and_recent_accepted",
+        }
+        publisher = getattr(writer, "set_reconciliation_snapshot", None)
+        if callable(publisher):
+            publisher(snapshot)
     return result
 
 
@@ -354,10 +492,24 @@ async def _run_one_pass(client: Any, writer: Any, phase: str) -> BackfillResult:
             logger.warning("Backfill (%s) skipped: session DEAD (user=%s)", phase, user)
             result = BackfillResult(session_dead=True)
         else:
-            result = await backfill_all_chats(client, writer)
+            legacy_limit = _env_int("BACKFILL_DIALOG_LIMIT", 0)
+            phase_limit = _env_int(
+                "BACKFILL_STARTUP_DIALOG_LIMIT"
+                if phase == "startup"
+                else "BACKFILL_PERIODIC_DIALOG_LIMIT",
+                1000 if phase == "startup" else 500,
+            )
+            result = await backfill_all_chats(
+                client,
+                writer,
+                dialog_limit=legacy_limit or phase_limit,
+                lookback_seconds=_env_int("BACKFILL_RECENT_LOOKBACK_SECONDS", 21600),
+            )
         logger.info(
             "Backfill %s (user=%s): scanned=%d new=%d written=%d unchanged=%d failed=%d "
-            "truncated=%d session_dead=%s",
+            "truncated=%d session_dead=%s budget_exhausted=%s lookback_complete=%s "
+            "heads=%d/%d missing=%d accepted=%d/%d accepted_missing=%d "
+            "skipped_policy=%d classification_errors=%d",
             phase,
             user,
             result.chats_scanned,
@@ -367,6 +519,16 @@ async def _run_one_pass(client: Any, writer: Any, phase: str) -> BackfillResult:
             result.chats_failed,
             result.seed_truncated_chats,
             result.session_dead,
+            result.budget_exhausted,
+            result.recent_scope_complete,
+            result.audit_heads_present,
+            result.audit_heads_checked,
+            result.audit_heads_missing,
+            result.audit_accepted_present,
+            result.audit_accepted_checked,
+            result.audit_accepted_missing,
+            result.audit_heads_skipped_policy,
+            result.audit_heads_classification_errors,
         )
         try:
             await writer.record_runtime_event(
