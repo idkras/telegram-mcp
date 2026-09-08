@@ -386,6 +386,50 @@ async def run_startup_backfill(client: Any, writer: Any) -> BackfillResult:
     return await _run_one_pass(client, writer, "startup")
 
 
+async def _run_deep_backfill_phase(client: Any, writer: Any) -> Any:
+    """Run the bounded backward phase on the listener's existing client."""
+    from heroes_platform.heroes_telegram_mcp.deep_backfill import deep_backfill_all_chats
+
+    options = dict(
+        total_budget=_env_int("DEEP_BACKFILL_TOTAL_BUDGET", 1000),
+        per_chat_limit=_env_int("DEEP_BACKFILL_PER_CHAT_LIMIT", 250),
+        chat_select_limit=_env_int("DEEP_BACKFILL_SELECT_LIMIT", 50),
+    )
+    max_passes = max(1, min(_env_int("DEEP_BACKFILL_STARTUP_MAX_PASSES", 20), 500))
+    result = None
+    for pass_number in range(1, max_passes + 1):
+        result = await deep_backfill_all_chats(client, writer, **options)
+        failures = [item for item in result.per_chat if item.error]
+        if failures:
+            if all(item.inactivated for item in failures):
+                logger.info(
+                    "Deep backfill continuing after inactivating %d inaccessible chats",
+                    len(failures),
+                )
+                continue
+            break
+        unfinished = [item for item in result.per_chat if not item.completed]
+        if result.messages_written > 0 and unfinished and pass_number < max_passes:
+            logger.info(
+                "Deep backfill continuing pass %d/%d with %d unfinished chats",
+                pass_number + 1,
+                max_passes,
+                len(unfinished),
+            )
+            continue
+        break
+    return result
+
+
+async def run_startup_cycle(client: Any, writer: Any) -> BackfillResult:
+    """Prioritise bounded history, then optionally scan every chat forward."""
+    if _env_bool("DEEP_BACKFILL_IN_LISTENER", False):
+        await _run_deep_backfill_phase(client, writer)
+    if _env_bool("BACKFILL_ON_STARTUP", True):
+        return await run_startup_backfill(client, writer)
+    return BackfillResult()
+
+
 # ── периодический backfill (ловит дрейф live-handler) ─────────────────────────
 async def periodic_backfill_loop(
     client: Any,
@@ -404,6 +448,8 @@ async def periodic_backfill_loop(
     while True:
         try:
             await asyncio.sleep(interval_seconds + jitter)
+            if _env_bool("DEEP_BACKFILL_IN_LISTENER", False):
+                await _run_deep_backfill_phase(client, writer)
             await _run_one_pass(client, writer, "periodic")
         except asyncio.CancelledError:
             raise
@@ -432,8 +478,8 @@ def schedule_backfill_tasks(loop: Any, client: Any, writer: Any) -> list[Any]:
     live-ingestion. Каждый таск получает done-callback для отлова silent death.
     Возвращает список созданных тасков (для тестов/отмены)."""
     tasks: list[Any] = []
-    if _env_bool("BACKFILL_ON_STARTUP", True):
-        t = loop.create_task(run_startup_backfill(client, writer))
+    if _env_bool("BACKFILL_ON_STARTUP", True) or _env_bool("DEEP_BACKFILL_IN_LISTENER", False):
+        t = loop.create_task(run_startup_cycle(client, writer))
         _attach_done_callback(t)
         tasks.append(t)
     interval = _env_int("BACKFILL_PERIODIC_INTERVAL_SECONDS", 3600)

@@ -139,6 +139,7 @@ class DeepBackfillChatResult:
     floor_before: int | None = None
     floor_after: int | None = None
     completed: bool = False
+    inactivated: bool = False
     error: str | None = None
 
 
@@ -246,6 +247,21 @@ async def deep_backfill_one_chat(
     cid_str = str(chat_id)
     cid_int = int(chat_id)
     result = DeepBackfillChatResult(chat_id=cid_str)
+
+    async def _record_failed_attempt(exc: Exception) -> None:
+        message = f"{type(exc).__name__}: {exc}"
+        result.error = message
+        unresolvable = "Could not find the input entity for PeerChannel" in str(exc)
+        deactivate = os.getenv("DEEP_BACKFILL_DEACTIVATE_UNRESOLVED", "false").lower() == "true"
+        if unresolvable and deactivate:
+            marker = getattr(writer, "mark_chat_inactive", None)
+            if marker is not None and await marker(cid_int):
+                result.inactivated = True
+                result.error = f"inaccessible chat inactivated: {message}"
+                return
+        touch = getattr(writer, "touch_backfill_attempt", None)
+        if touch is not None:
+            await touch(cid_int)
 
     cursor = await writer.get_chat_cursor(cid_int)
     if cursor and cursor.get("backfill_completed"):
@@ -386,10 +402,10 @@ async def deep_backfill_one_chat(
             except Exception as retry_exc:  # noqa: BLE001
                 # Сохраняем то что успели записать в любом из проходов до сбоя.
                 result.written = pass_state["written"]
-                result.error = f"{type(retry_exc).__name__}: {retry_exc}"
+                await _record_failed_attempt(retry_exc)
                 return result
         result.written = pass_state["written"]
-        result.error = f"{type(exc).__name__}: {exc}"
+        await _record_failed_attempt(exc)
         return result
 
 
@@ -528,6 +544,50 @@ async def _select_chats_for_deep_backfill(
         )
 
 
+def _chat_id_forms(value: int | str) -> set[int]:
+    raw = int(value)
+    forms = {raw}
+    text = str(raw)
+    if text.startswith("-100") and text[4:].isdigit():
+        forms.add(int(text[4:]))
+    elif raw > 0:
+        forms.add(-(1_000_000_000_000 + raw))
+    return forms
+
+
+async def _warm_selected_entity_cache(client: Any, chat_ids: list[int | str]) -> set[str]:
+    """Resolve selected peers with one dialog scan, not one scan per failure."""
+    unresolved = {str(value): _chat_id_forms(value) for value in chat_ids}
+    get_input_entity = getattr(client, "get_input_entity", None)
+    if get_input_entity is not None:
+        for key in list(unresolved):
+            try:
+                await get_input_entity(int(key))
+                unresolved.pop(key, None)
+            except Exception:  # noqa: BLE001
+                pass
+    iter_dialogs = getattr(client, "iter_dialogs", None)
+    if unresolved and iter_dialogs is not None:
+        async for dialog in iter_dialogs():
+            entity = getattr(dialog, "entity", None)
+            observed = set()
+            for candidate in (getattr(dialog, "id", None), getattr(entity, "id", None)):
+                if candidate is not None:
+                    observed |= _chat_id_forms(candidate)
+            for key, forms in list(unresolved.items()):
+                if forms & observed:
+                    unresolved.pop(key, None)
+            if not unresolved:
+                break
+    if unresolved:
+        logger.warning(
+            "Deep backfill could not resolve %d selected peers after one dialog scan: %s",
+            len(unresolved),
+            ",".join(list(unresolved)[:10]),
+        )
+    return set(unresolved)
+
+
 # ── оркестратор: все чаты с приоритетом по last_backfill_ts ──────────────────
 async def deep_backfill_all_chats(
     client: Any,
@@ -596,6 +656,11 @@ async def deep_backfill_all_chats(
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to record no-op marker: %s", exc)
             return result
+
+        # StringSession carries the auth key but not a durable entity cache.
+        # Resolve only selected historical peers in one dialog pass before any
+        # GetHistory calls; this closes the old PeerChannel/access_hash loop.
+        await _warm_selected_entity_cache(client, [chat_id for chat_id, _ in chats])
 
         for chat_id, chat_type in chats:
             if result.messages_written >= total_budget:

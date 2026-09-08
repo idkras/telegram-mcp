@@ -18,6 +18,31 @@ WorkingDirectory=__APP_DIR__
 EnvironmentFile=/etc/telegram-mcp/env.d/__PROFILE__.env
 Environment=PYTHONPATH=__APP_DIR__
 Environment=HEROES_CREDENTIALS_REGISTRY=__APP_DIR__/heroes_harness/credentials_registry.yaml
+Environment=TELEGRAM_MCP_TRANSPORT=streamable-http
+Environment=TELEGRAM_MCP_HOST=127.0.0.1
+Environment=TELEGRAM_MCP_PORT=__MCP_PORT__
+Environment=TELEGRAM_MCP_PATH=/mcp
+Environment=TELEGRAM_MCP_SINGLE_PROFILE=true
+# Both profile units share the Supabase session-mode pool.  The writer runs
+# synchronously inside each asyncio process, so two connections per profile are
+# sufficient and prevent the two services from reserving 16 sessions together.
+Environment=TELEGRAM_PG_POOL_MIN=1
+Environment=TELEGRAM_PG_POOL_MAX=2
+Environment=TELEGRAM_PG_ACQUIRE_TIMEOUT_SECONDS=30
+# The MCP health endpoint is queried by SwiftBar and agents.  One database
+# snapshot per profile/minute is enough; concurrent callers join the refresh.
+Environment=TELEGRAM_MONITORING_CACHE_TTL_SECONDS=60
+Environment=TELEGRAM_MONITORING_FAILURE_TTL_SECONDS=15
+Environment=BACKFILL_ON_STARTUP=false
+# Deep history is a bounded maintenance startup mode.  Keep it off after the
+# historical pass so a saturated database pool cannot delay MCP HTTP startup;
+# the periodic forward catch-up remains scheduled by the listener.
+Environment=DEEP_BACKFILL_IN_LISTENER=false
+Environment=DEEP_BACKFILL_TOTAL_BUDGET=1000
+Environment=DEEP_BACKFILL_PER_CHAT_LIMIT=250
+Environment=DEEP_BACKFILL_SELECT_LIMIT=50
+Environment=DEEP_BACKFILL_DEACTIVATE_UNRESOLVED=true
+Environment=DEEP_BACKFILL_STARTUP_MAX_PASSES=200
 ExecStart=__APP_DIR__/.venv/bin/python listener.py
 Restart=on-failure
 RestartSec=5
@@ -31,3 +56,4 @@ SyslogIdentifier=telegram-mcp-__PROFILE__
 
 [Install]
 WantedBy=multi-user.target
+Alias=telegram-mcp-__PROFILE__-remote.service

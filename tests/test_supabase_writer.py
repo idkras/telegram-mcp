@@ -7,6 +7,8 @@ and manages batch operations.
 Data source: Unit tests with mock Telethon message objects (no live Supabase).
 """
 import json
+import threading
+import time
 import pytest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, AsyncMock, patch
@@ -771,3 +773,124 @@ class TestSchemaPerProfile:
         from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
         assert SupabaseWriter(telegram_user_id="lisa").schema == "tg_lisa"
         assert SupabaseWriter(telegram_user_id="ikrasinsky").schema == "rick_messages_tasks"
+
+
+class TestDbLoadGuardrails:
+    def _bare_writer(self):
+        from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
+
+        writer = SupabaseWriter.__new__(SupabaseWriter)
+        writer.telegram_user_id = "ikrasinsky"
+        writer.schema = "rick_messages_tasks"
+        writer._postgres_url = "postgresql://fake"
+        writer._pg_pool = None
+        return writer
+
+    def test_concurrent_monitoring_calls_are_singleflight(self, monkeypatch):
+        writer = self._bare_writer()
+        monkeypatch.setenv("TELEGRAM_MONITORING_CACHE_TTL_SECONDS", "60")
+        calls = 0
+        calls_lock = threading.Lock()
+
+        def query_once():
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+            time.sleep(0.03)
+            return {"ok": True, "profile": "ikrasinsky", "age_s": 1}
+
+        writer._query_monitoring_snapshot_sync = query_once
+        results = []
+        threads = [
+            threading.Thread(target=lambda: results.append(writer._get_monitoring_snapshot_sync()))
+            for _ in range(100)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(2)
+
+        assert calls == 1
+        assert len(results) == 100
+        assert all(result["ok"] is True for result in results)
+        assert sum(bool(result.get("cache_hit")) for result in results) >= 99
+
+    def test_failed_refresh_never_returns_stale_cache_as_green(self, monkeypatch):
+        writer = self._bare_writer()
+        monkeypatch.setenv("TELEGRAM_MONITORING_CACHE_TTL_SECONDS", "1")
+        writer._ensure_db_load_state()
+        writer._monitoring_cache = {
+            "ok": True,
+            "profile": "ikrasinsky",
+            "observed_at": "2026-08-19T00:00:00+00:00",
+        }
+        writer._monitoring_cache_at = time.monotonic() - 60
+        writer._query_monitoring_snapshot_sync = lambda: {"ok": False, "error": "pool busy"}
+
+        result = writer._get_monitoring_snapshot_sync()
+
+        assert result["ok"] is False
+        assert result["stale"] is True
+        assert result["last_good"]["ok"] is True
+
+    def test_concurrent_failed_monitoring_calls_share_negative_cache(self, monkeypatch):
+        writer = self._bare_writer()
+        monkeypatch.setenv("TELEGRAM_MONITORING_FAILURE_TTL_SECONDS", "15")
+        calls = 0
+        calls_lock = threading.Lock()
+
+        def query_once():
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+            time.sleep(0.03)
+            return {"ok": False, "error": "statement timeout"}
+
+        writer._query_monitoring_snapshot_sync = query_once
+        results = []
+        threads = [
+            threading.Thread(target=lambda: results.append(writer._get_monitoring_snapshot_sync()))
+            for _ in range(100)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(2)
+
+        assert calls == 1
+        assert len(results) == 100
+        assert all(result["ok"] is False for result in results)
+
+    def test_fifty_rows_use_one_multi_value_statement(self, monkeypatch):
+        writer = self._bare_writer()
+        conn = MagicMock()
+        execute_values = MagicMock()
+        monkeypatch.setattr("psycopg2.extras.execute_values", execute_values)
+        rows = [
+            {
+                "source": "telegram",
+                "telegram_user_id": "ikrasinsky",
+                "chat_id": "1",
+                "chat_type": "private",
+                "message_id": i,
+                "sender_user_id": "2",
+                "sender_name": "A",
+                "sender_username": "a",
+                "message_ts": "2026-08-20T00:00:00+00:00",
+                "text": "x",
+                "raw": {"id": i},
+            }
+            for i in range(50)
+        ]
+
+        assert writer._write_messages_batch_pg(conn, rows) == 50
+        execute_values.assert_called_once()
+        assert conn.cursor.return_value.execute.call_count == 0
+
+    def test_monitoring_hot_path_avoids_full_hour_count(self):
+        import inspect
+        from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
+
+        source = inspect.getsource(SupabaseWriter._query_monitoring_snapshot_sync)
+
+        assert "created_at > now() - interval '1 hour'" not in source

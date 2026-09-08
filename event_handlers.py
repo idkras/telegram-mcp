@@ -173,7 +173,19 @@ def register_event_handlers(client: Any) -> None:
     async def _record_runtime_event(mode: str) -> None:
         try:
             writer = _get_writer()
-            await writer.record_runtime_event(mode=mode, processed_chats=0, inserted_messages=0)
+            # psycopg2 is synchronous.  A saturated session-mode pool can spend
+            # tens of seconds in connect(); keep that wait off the Telethon/MCP
+            # event loop so HTTP binds and live Telegram updates remain responsive.
+            def _write_marker() -> None:
+                asyncio.run(
+                    writer.record_runtime_event(
+                        mode=mode,
+                        processed_chats=0,
+                        inserted_messages=0,
+                    )
+                )
+
+            await asyncio.to_thread(_write_marker)
         except Exception as exc:
             logger.warning("Failed to write %s ingest marker: %s", mode, exc)
 

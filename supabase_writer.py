@@ -18,10 +18,15 @@ Migration: 20250110000001_telegram_tdlib_tables.sql (must be applied first)
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import socket
+import threading
+import time
 import uuid
+from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
@@ -219,12 +224,14 @@ class SupabaseWriter:
     ) -> None:
         self._client: Any | None = None
         self._pg_pool: Any | None = None   # R3 D5: bounded connection pool (lazy)
+        self._pg_pool_init_lock = threading.Lock()
         self.telegram_user_id = telegram_user_id
         # Schema-per-profile: каждый аккаунт пишет в свою схему (data не смешивается).
         self.schema = _schema_for_profile(telegram_user_id)
         self._batch: list[dict[str, Any]] = []
         self.batch_size = 50
         self._postgres_url = postgres_url or _get_postgres_url()
+        self._ensure_db_load_state()
         # Direct Postgres (Keychain SUPABASE_DB_URL / supabase_rick_db_url) may be unreachable from some
         # networks while HTTPS REST to supabase.rick.ai works — force REST upserts for chat registry.
         if os.getenv("SUPABASE_TELEGRAM_USE_REST_ONLY", "").strip().lower() in (
@@ -305,35 +312,398 @@ class SupabaseWriter:
         except Exception as exc:
             return False, f"Telegram LABA runtime probe failed: {exc}"
 
+    async def get_monitoring_snapshot(self) -> dict[str, Any]:
+        """Return owner-facing ingest/history evidence through this process's pool.
+
+        Monitoring must reuse the listener's existing session-mode connection.
+        Opening a third standalone Postgres client can itself exhaust a small
+        Supabase pool and turn a healthy listener into a false orange signal.
+        """
+        return await asyncio.to_thread(self._get_monitoring_snapshot_sync)
+
+    def _get_monitoring_snapshot_sync(self) -> dict[str, Any]:
+        """Cache and singleflight the owner-facing DB probe.
+
+        MCP smoke performs four HTTP requests and can be invoked concurrently by
+        SwiftBar, operators and agents.  Only the first caller per TTL is allowed
+        to hit Postgres; joiners reuse the same evidence.  A failed refresh never
+        returns an old success as green.
+        """
+        self._ensure_db_load_state()
+        with self._db_metrics_lock:
+            self._db_metrics["monitoring_requests_total"] += 1
+        ttl = max(1.0, float(os.getenv("TELEGRAM_MONITORING_CACHE_TTL_SECONDS", "60")))
+        failure_ttl = max(
+            1.0, float(os.getenv("TELEGRAM_MONITORING_FAILURE_TTL_SECONDS", "15"))
+        )
+        now = time.monotonic()
+        if self._monitoring_cache is not None and now - self._monitoring_cache_at <= ttl:
+            with self._db_metrics_lock:
+                self._db_metrics["monitoring_cache_hits_total"] += 1
+            cached = dict(self._monitoring_cache)
+            cached.update(cache_hit=True, stale=False, cache_age_s=round(now - self._monitoring_cache_at, 3))
+            cached["db_load"] = self.get_db_load_snapshot()
+            return cached
+        if (
+            self._monitoring_failure_cache is not None
+            and now - self._monitoring_failure_at <= failure_ttl
+        ):
+            failed = dict(self._monitoring_failure_cache)
+            failed.update(cache_hit=True, stale=self._monitoring_cache is not None)
+            failed["db_load"] = self.get_db_load_snapshot()
+            return failed
+
+        with self._monitoring_refresh_lock:
+            now = time.monotonic()
+            if self._monitoring_cache is not None and now - self._monitoring_cache_at <= ttl:
+                with self._db_metrics_lock:
+                    self._db_metrics["monitoring_cache_hits_total"] += 1
+                cached = dict(self._monitoring_cache)
+                cached.update(cache_hit=True, stale=False, cache_age_s=round(now - self._monitoring_cache_at, 3))
+                cached["db_load"] = self.get_db_load_snapshot()
+                return cached
+            if (
+                self._monitoring_failure_cache is not None
+                and now - self._monitoring_failure_at <= failure_ttl
+            ):
+                failed = dict(self._monitoring_failure_cache)
+                failed.update(cache_hit=True, stale=self._monitoring_cache is not None)
+                failed["db_load"] = self.get_db_load_snapshot()
+                return failed
+            with self._db_metrics_lock:
+                self._db_metrics["monitoring_refreshes_total"] += 1
+            result = self._query_monitoring_snapshot_sync()
+            observed_at = datetime.now(tz=timezone.utc).isoformat()
+            if result.get("ok") is True:
+                result = dict(result)
+                result.update(
+                    observed_at=observed_at,
+                    cache_hit=False,
+                    stale=False,
+                    cache_age_s=0.0,
+                )
+                self._monitoring_cache = dict(result)
+                self._monitoring_cache_at = time.monotonic()
+                self._monitoring_failure_cache = None
+                self._monitoring_failure_at = 0.0
+                result["db_load"] = self.get_db_load_snapshot()
+                self._monitoring_cache["db_load"] = result["db_load"]
+                return result
+
+            failed = dict(result)
+            failed.update(
+                ok=False,
+                observed_at=observed_at,
+                cache_hit=False,
+                stale=self._monitoring_cache is not None,
+                db_load=self.get_db_load_snapshot(),
+            )
+            if self._monitoring_cache is not None:
+                failed["last_good"] = dict(self._monitoring_cache)
+                failed["last_good_age_s"] = round(time.monotonic() - self._monitoring_cache_at, 3)
+            self._monitoring_failure_cache = dict(failed)
+            self._monitoring_failure_at = time.monotonic()
+            return failed
+
+    def _query_monitoring_snapshot_sync(self) -> dict[str, Any]:
+        if not self._postgres_url:
+            return {"ok": False, "error": "direct Postgres monitoring is not configured"}
+        started = time.monotonic()
+        try:
+            with self._pg_conn(operation="monitoring", timeout_seconds=2.0) as conn:
+                cur = conn.cursor()
+                try:
+                    cur.execute(
+                        f"""
+                        SELECT
+                          extract(epoch from (now() -
+                            (SELECT created_at FROM {self.schema}.telegram_messages_raw
+                             ORDER BY id DESC LIMIT 1)))::int AS age_s,
+                          (SELECT count(*) FROM {self.schema}.telegram_chat_state
+                           WHERE is_active=true) AS active_chats,
+                          (SELECT count(*) FROM {self.schema}.telegram_chat_state
+                           WHERE is_active=true AND backfill_completed=true) AS completed_chats,
+                          (SELECT mode FROM {self.schema}.telegram_ingest_runs
+                           WHERE mode LIKE 'deep_backfill_%'
+                           ORDER BY started_at DESC LIMIT 1) AS deep_mode,
+                          (SELECT extract(epoch from (now() - started_at))::int
+                           FROM {self.schema}.telegram_ingest_runs
+                           WHERE mode LIKE 'deep_backfill_%'
+                           ORDER BY started_at DESC LIMIT 1) AS deep_age_s,
+                          (SELECT processed_chats FROM {self.schema}.telegram_ingest_runs
+                           WHERE mode LIKE 'deep_backfill_%'
+                           ORDER BY started_at DESC LIMIT 1) AS deep_chats,
+                          (SELECT inserted_messages FROM {self.schema}.telegram_ingest_runs
+                           WHERE mode LIKE 'deep_backfill_%'
+                           ORDER BY started_at DESC LIMIT 1) AS deep_messages,
+                          (SELECT last_error FROM {self.schema}.telegram_ingest_runs
+                           WHERE mode LIKE 'deep_backfill_%'
+                           ORDER BY started_at DESC LIMIT 1) AS deep_error
+                        """
+                    )
+                    row = cur.fetchone()
+                finally:
+                    cur.close()
+            self._record_db_work("monitoring", duration_s=time.monotonic() - started)
+            if not row:
+                return {"ok": False, "error": "monitoring query returned no row"}
+            return {
+                "ok": True,
+                "profile": self.telegram_user_id,
+                "schema": self.schema,
+                "age_s": int(row[0]) if row[0] is not None else None,
+                "active_chats": int(row[1] or 0),
+                "completed_chats": int(row[2] or 0),
+                "deep_mode": row[3],
+                "deep_age_s": int(row[4]) if row[4] is not None else None,
+                "deep_chats": int(row[5] or 0),
+                "deep_messages": int(row[6] or 0),
+                "deep_error": str(row[7] or ""),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:240]}
+
+    def _ensure_db_load_state(self) -> None:
+        """Initialize pool admission, rolling counters and health singleflight.
+
+        The lazy branch keeps old tests and recovery scripts that construct the
+        writer through ``__new__`` compatible while normal instances initialize
+        everything during ``__init__``.
+        """
+        if hasattr(self, "_db_metrics_lock"):
+            return
+        init_lock = self.__dict__.setdefault("_db_state_init_lock", threading.Lock())
+        with init_lock:
+            if hasattr(self, "_db_metrics_lock"):
+                return
+            self._pg_pool_init_lock = getattr(self, "_pg_pool_init_lock", threading.Lock())
+            self._pg_pool_min = max(1, int(os.getenv("TELEGRAM_PG_POOL_MIN", "1")))
+            self._pg_pool_max = max(self._pg_pool_min, int(os.getenv("TELEGRAM_PG_POOL_MAX", "8")))
+            self._pg_slots = threading.BoundedSemaphore(self._pg_pool_max)
+            profile = getattr(self, "telegram_user_id", "unknown")
+            self._pg_application_name = f"telegram-mcp/{profile}/{socket.gethostname()}"[:63]
+            self._pg_configured_conn_ids: set[int] = set()
+            self._pg_config_lock = threading.Lock()
+            self._db_metrics_lock = threading.Lock()
+            self._db_metrics = {
+                "pool_in_use": 0,
+                "peak_in_use": 0,
+                "pool_checkouts_total": 0,
+                "waits_total": 0,
+                "acquire_timeouts_total": 0,
+                "discarded_connections_total": 0,
+                "db_errors_total": 0,
+                "sql_statements_total": 0,
+                "rows_written_total": 0,
+                "monitoring_requests_total": 0,
+                "monitoring_cache_hits_total": 0,
+                "monitoring_refreshes_total": 0,
+            }
+            self._db_work_events: deque[tuple[float, int, int]] = deque()
+            self._monitoring_refresh_lock = threading.Lock()
+            self._monitoring_cache: dict[str, Any] | None = None
+            self._monitoring_cache_at = 0.0
+            self._monitoring_failure_cache: dict[str, Any] | None = None
+            self._monitoring_failure_at = 0.0
+
+    def _record_db_work(
+        self,
+        operation: str,
+        *,
+        statements: int = 0,
+        rows: int = 0,
+        duration_s: float = 0.0,
+    ) -> None:
+        del operation, duration_s  # operation labels are intentionally not user data
+        self._ensure_db_load_state()
+        now = time.monotonic()
+        with self._db_metrics_lock:
+            self._db_metrics["sql_statements_total"] += max(0, statements)
+            self._db_metrics["rows_written_total"] += max(0, rows)
+            if statements or rows:
+                self._db_work_events.append((now, max(0, statements), max(0, rows)))
+            cutoff = now - 300.0
+            while self._db_work_events and self._db_work_events[0][0] < cutoff:
+                self._db_work_events.popleft()
+
+    def get_db_load_snapshot(self) -> dict[str, Any]:
+        """Return process-local admission and actual SQL counters for monitoring."""
+        self._ensure_db_load_state()
+        now = time.monotonic()
+        with self._db_metrics_lock:
+            cutoff = now - 300.0
+            while self._db_work_events and self._db_work_events[0][0] < cutoff:
+                self._db_work_events.popleft()
+            one_minute = [event for event in self._db_work_events if event[0] >= now - 60.0]
+            five_minutes = list(self._db_work_events)
+            snapshot = dict(self._db_metrics)
+            snapshot.update(
+                pool_min=self._pg_pool_min,
+                pool_max=self._pg_pool_max,
+                sql_statements_1m=sum(event[1] for event in one_minute),
+                sql_statements_5m=sum(event[1] for event in five_minutes),
+                rows_written_1m=sum(event[2] for event in one_minute),
+                rows_written_5m=sum(event[2] for event in five_minutes),
+            )
+            return snapshot
+
     def _get_pool(self) -> Any:
         """R3 D5 fix (pr-hero-1u1): lazily create a BOUNDED connection pool. Before,
         every _pg_conn() opened a fresh psycopg2.connect — 200 chats × N batches during
         backfill blew past Postgres max_connections → 'too many connections' → cursor
         stuck → lag grows geometrically. A ThreadedConnectionPool caps concurrency and
         reuses connections. Bounds via TELEGRAM_PG_POOL_MIN/MAX (default 1..8)."""
+        self._ensure_db_load_state()
         if self._pg_pool is None:
-            from psycopg2.pool import ThreadedConnectionPool
+            with self._pg_pool_init_lock:
+                if self._pg_pool is None:
+                    from psycopg2.extensions import cursor as PsycopgCursor
+                    from psycopg2.pool import ThreadedConnectionPool
 
-            minc = int(os.getenv("TELEGRAM_PG_POOL_MIN", "1"))
-            maxc = int(os.getenv("TELEGRAM_PG_POOL_MAX", "8"))
-            self._pg_pool = ThreadedConnectionPool(minc, maxc, self._postgres_url)
+                    writer = self
+
+                    class MetricsCursor(PsycopgCursor):
+                        def execute(self, query: Any, vars: Any = None) -> Any:
+                            try:
+                                return super().execute(query, vars)
+                            finally:
+                                writer._record_db_work("cursor_execute", statements=1)
+
+                        def executemany(self, query: Any, vars_list: Any) -> Any:
+                            values = list(vars_list)
+                            try:
+                                return super().executemany(query, values)
+                            finally:
+                                writer._record_db_work(
+                                    "cursor_executemany", statements=len(values)
+                                )
+
+                    self._pg_pool = ThreadedConnectionPool(
+                        self._pg_pool_min,
+                        self._pg_pool_max,
+                        self._postgres_url,
+                        connect_timeout=10,
+                        application_name=self._pg_application_name,
+                        cursor_factory=MetricsCursor,
+                    )
         return self._pg_pool
 
+    def _configure_pg_connection(self, conn: Any) -> None:
+        """Apply attribution/timeouts after Supavisor hands out the session.
+
+        Supavisor may replace startup ``application_name`` and ignore libpq
+        ``options``.  Session-level set_config is therefore the readbackable
+        contract.  It runs once per physical client connection.
+        """
+        conn_id = id(conn)
+        if conn_id in self._pg_configured_conn_ids:
+            return
+        with self._pg_config_lock:
+            if conn_id in self._pg_configured_conn_ids:
+                return
+            statement_timeout_ms = max(
+                1000, int(os.getenv("TELEGRAM_PG_STATEMENT_TIMEOUT_MS", "15000"))
+            )
+            idle_timeout_ms = max(
+                1000, int(os.getenv("TELEGRAM_PG_IDLE_TX_TIMEOUT_MS", "5000"))
+            )
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    "SELECT set_config('application_name', %s, false)",
+                    (self._pg_application_name,),
+                )
+                cur.execute(
+                    "SELECT set_config('statement_timeout', %s, false)",
+                    (str(statement_timeout_ms),),
+                )
+                cur.execute(
+                    "SELECT set_config('idle_in_transaction_session_timeout', %s, false)",
+                    (str(idle_timeout_ms),),
+                )
+                conn.commit()
+            finally:
+                cur.close()
+            self._pg_configured_conn_ids.add(conn_id)
+
     @contextmanager
-    def _pg_conn(self) -> Iterator[Any]:
+    def _pg_conn(
+        self,
+        operation: str = "other",
+        timeout_seconds: float | None = None,
+    ) -> Iterator[Any]:
         """Yield a pooled psycopg2 connection (R3 D5). Caller must not use when
         _postgres_url is None. Connection is rolled back and returned to the pool on
         exit so an aborted transaction never poisons the next borrower."""
+        self._ensure_db_load_state()
         pool = self._get_pool()
-        conn = pool.getconn()
+        if timeout_seconds is None:
+            timeout_seconds = float(os.getenv("TELEGRAM_PG_ACQUIRE_TIMEOUT_SECONDS", "30"))
+        wait_started = time.monotonic()
+        acquired = self._pg_slots.acquire(timeout=max(0.0, timeout_seconds))
+        waited_s = time.monotonic() - wait_started
+        if waited_s >= 0.001:
+            with self._db_metrics_lock:
+                self._db_metrics["waits_total"] += 1
+        if not acquired:
+            with self._db_metrics_lock:
+                self._db_metrics["acquire_timeouts_total"] += 1
+            raise TimeoutError(
+                f"Postgres pool admission timed out after {timeout_seconds:g}s "
+                f"for {operation} (max={self._pg_pool_max})"
+            )
+        conn = None
         try:
+            for attempt in range(2):
+                candidate = pool.getconn()
+                try:
+                    if bool(getattr(candidate, "closed", False)):
+                        raise ConnectionError("pooled Postgres connection is already closed")
+                    self._configure_pg_connection(candidate)
+                    conn = candidate
+                    break
+                except Exception:
+                    pool.putconn(candidate, close=True)
+                    with self._db_metrics_lock:
+                        self._db_metrics["discarded_connections_total"] += 1
+                    with self._pg_config_lock:
+                        self._pg_configured_conn_ids.discard(id(candidate))
+                    if attempt == 1:
+                        raise
+            if conn is None:  # defensive: loop above either assigns or raises
+                raise ConnectionError("no healthy Postgres connection available")
+            with self._db_metrics_lock:
+                self._db_metrics["pool_in_use"] += 1
+                self._db_metrics["pool_checkouts_total"] += 1
+                self._db_metrics["peak_in_use"] = max(
+                    self._db_metrics["peak_in_use"], self._db_metrics["pool_in_use"]
+                )
             yield conn
+        except Exception:
+            with self._db_metrics_lock:
+                self._db_metrics["db_errors_total"] += 1
+            raise
         finally:
             try:
-                conn.rollback()   # clear any aborted txn before reuse
-            except Exception:  # noqa: BLE001
-                pass
-            pool.putconn(conn)
+                if conn is not None:
+                    discard = bool(getattr(conn, "closed", False))
+                    try:
+                        conn.rollback()   # clear any aborted txn before reuse
+                    except Exception:  # noqa: BLE001
+                        discard = True
+                    try:
+                        pool.putconn(conn, close=discard)
+                    finally:
+                        with self._db_metrics_lock:
+                            self._db_metrics["pool_in_use"] = max(
+                                0, self._db_metrics["pool_in_use"] - 1
+                            )
+                        if discard:
+                            self._db_metrics["discarded_connections_total"] += 1
+                            with self._pg_config_lock:
+                                self._pg_configured_conn_ids.discard(id(conn))
+            finally:
+                self._pg_slots.release()
 
     def _get_runtime_activity(self) -> tuple[datetime | None, datetime | None]:
         """Return latest listener heartbeat timestamp and latest message timestamp."""
@@ -661,6 +1031,7 @@ class SupabaseWriter:
                 ),
             )
             conn.commit()
+            self._record_db_work("message_upsert", rows=1)
             return True
         except Exception:
             conn.rollback()
@@ -669,12 +1040,12 @@ class SupabaseWriter:
             cur.close()
 
     def _write_messages_batch_pg(self, conn: Any, rows: list[dict[str, Any]]) -> int:
-        """Batch upsert via direct Postgres."""
+        """Set-based batch upsert via one statement per page, not one per row."""
         q = f"""
         INSERT INTO {self.schema}.telegram_messages_raw
         (source, telegram_user_id, chat_id, chat_type, message_id,
          sender_user_id, sender_name, sender_username, message_ts, text, raw)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+        VALUES %s
         ON CONFLICT (chat_id, message_id) DO UPDATE SET
           sender_user_id=EXCLUDED.sender_user_id, sender_name=EXCLUDED.sender_name,
           sender_username=EXCLUDED.sender_username, message_ts=EXCLUDED.message_ts,
@@ -682,24 +1053,33 @@ class SupabaseWriter:
         """
         cur = conn.cursor()
         try:
-            for row in rows:
-                cur.execute(
-                    q,
-                    (
-                        row["source"],
-                        row["telegram_user_id"],
-                        row["chat_id"],
-                        row["chat_type"],
-                        row["message_id"],
-                        row.get("sender_user_id"),
-                        row.get("sender_name"),
-                        row.get("sender_username"),
-                        row.get("message_ts"),
-                        row.get("text"),
-                        json.dumps(row["raw"]),
-                    ),
+            from psycopg2.extras import execute_values  # type: ignore
+
+            values = [
+                (
+                    row["source"],
+                    row["telegram_user_id"],
+                    row["chat_id"],
+                    row["chat_type"],
+                    row["message_id"],
+                    row.get("sender_user_id"),
+                    row.get("sender_name"),
+                    row.get("sender_username"),
+                    row.get("message_ts"),
+                    row.get("text"),
+                    json.dumps(row["raw"]),
                 )
+                for row in rows
+            ]
+            execute_values(
+                cur,
+                q,
+                values,
+                template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
+                page_size=100,
+            )
             conn.commit()
+            self._record_db_work("message_batch_upsert", rows=len(rows))
             return len(rows)
         except Exception:
             conn.rollback()
@@ -726,11 +1106,14 @@ class SupabaseWriter:
             if row is None:  # guardian skipped a blacklisted chat — handled, not written
                 return True
             if self._postgres_url:
-                with self._pg_conn() as conn:
-                    ok = self._write_message_pg(conn, row)
-                    if ok:
-                        self._index_articles(conn, [row])
-                    return ok
+                def _write() -> bool:
+                    with self._pg_conn(operation="live_message") as conn:
+                        ok = self._write_message_pg(conn, row)
+                        if ok:
+                            self._index_articles(conn, [row])
+                        return ok
+
+                return await asyncio.to_thread(_write)
             self._table(TABLE_MESSAGES).upsert(
                 row,
                 on_conflict="chat_id,message_id",
@@ -771,11 +1154,14 @@ class SupabaseWriter:
 
         try:
             if self._postgres_url:
-                with self._pg_conn() as conn:
-                    written = self._write_messages_batch_pg(conn, rows)
-                    if written:
-                        self._index_articles(conn, rows)
-                    return written
+                def _write_batch() -> int:
+                    with self._pg_conn(operation="message_batch") as conn:
+                        written = self._write_messages_batch_pg(conn, rows)
+                        if written:
+                            self._index_articles(conn, rows)
+                        return written
+
+                return await asyncio.to_thread(_write_batch)
             self._table(TABLE_MESSAGES).upsert(
                 rows,
                 on_conflict="chat_id,message_id",
@@ -978,14 +1364,17 @@ class SupabaseWriter:
                 return True
             cid = str(chat_id)
             if self._postgres_url:
-                with self._pg_conn() as conn:
-                    return self._update_chat_cursor_pg(
-                        conn,
-                        cid,
-                        last_seen_message_id,
-                        last_backfill_message_id,
-                        backfill_completed,
-                    )
+                def _update() -> bool:
+                    with self._pg_conn(operation="cursor_update") as conn:
+                        return self._update_chat_cursor_pg(
+                            conn,
+                            cid,
+                            last_seen_message_id,
+                            last_backfill_message_id,
+                            backfill_completed,
+                        )
+
+                return await asyncio.to_thread(_update)
             update: dict[str, Any] = {
                 "telegram_user_id": self.telegram_user_id,
                 "chat_id": cid,
@@ -1006,6 +1395,83 @@ class SupabaseWriter:
             return True
         except Exception as exc:
             logger.warning("Failed to update cursor for chat %s: %s", chat_id, exc)
+            return False
+
+    async def touch_backfill_attempt(self, chat_id: int | str) -> bool:
+        """Rotate a failed chat without claiming cursor progress or completion.
+
+        ``last_backfill_ts`` is the scheduler's last-attempt timestamp.  Moving
+        only that field keeps an inaccessible/left channel visible as a failed
+        runtime event while preventing it from monopolising every oldest-first
+        selection window.
+        """
+        cid = str(chat_id)
+        now = datetime.now(tz=timezone.utc)
+        try:
+            if self._postgres_url:
+                with self._pg_conn() as conn:
+                    self._ensure_chat_state_pg(conn, cid)
+                    cur = conn.cursor()
+                    try:
+                        cur.execute(
+                            f"""
+                            UPDATE {self.schema}.telegram_chat_state
+                            SET last_backfill_ts=%s
+                            WHERE telegram_user_id=%s AND chat_id=%s
+                            """,
+                            (now, self.telegram_user_id, cid),
+                        )
+                        conn.commit()
+                    finally:
+                        cur.close()
+                return True
+            self._table(TABLE_CHAT_STATE).upsert(
+                {
+                    "telegram_user_id": self.telegram_user_id,
+                    "chat_id": cid,
+                    "last_backfill_ts": now.isoformat(),
+                },
+                on_conflict="telegram_user_id,chat_id",
+            ).execute()
+            return True
+        except Exception as exc:
+            logger.warning("Failed to touch backfill attempt for chat %s: %s", chat_id, exc)
+            return False
+
+    async def mark_chat_inactive(self, chat_id: int | str) -> bool:
+        """Remove a proven inaccessible peer from the active history queue."""
+        cid = str(chat_id)
+        now = datetime.now(tz=timezone.utc)
+        try:
+            if self._postgres_url:
+                with self._pg_conn() as conn:
+                    self._ensure_chat_state_pg(conn, cid)
+                    cur = conn.cursor()
+                    try:
+                        cur.execute(
+                            f"""
+                            UPDATE {self.schema}.telegram_chat_state
+                            SET is_active=FALSE, last_backfill_ts=%s
+                            WHERE telegram_user_id=%s AND chat_id=%s
+                            """,
+                            (now, self.telegram_user_id, cid),
+                        )
+                        conn.commit()
+                    finally:
+                        cur.close()
+                return True
+            self._table(TABLE_CHAT_STATE).upsert(
+                {
+                    "telegram_user_id": self.telegram_user_id,
+                    "chat_id": cid,
+                    "is_active": False,
+                    "last_backfill_ts": now.isoformat(),
+                },
+                on_conflict="telegram_user_id,chat_id",
+            ).execute()
+            return True
+        except Exception as exc:
+            logger.warning("Failed to mark inaccessible chat %s inactive: %s", chat_id, exc)
             return False
 
     def _get_chat_cursor_pg(self, conn: Any, chat_id: str) -> dict[str, Any] | None:

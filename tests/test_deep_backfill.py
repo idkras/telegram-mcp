@@ -23,6 +23,7 @@ from heroes_platform.heroes_telegram_mcp.deep_backfill import (  # noqa: E402
     DeepBackfillChatResult,
     _flood_wait_seconds,
     _resolve_floor,
+    _warm_selected_entity_cache,
     deep_backfill_all_chats,
     deep_backfill_one_chat,
 )
@@ -103,6 +104,8 @@ class FakeWriter:
         self.received_chat_titles = []
         self.cursor_updates = []
         self.runtime_events = []
+        self.backfill_attempts = []
+        self.inactivated_chats = []
 
     async def get_chat_cursor(self, chat_id):
         return self._cursors.get(int(chat_id))
@@ -141,6 +144,14 @@ class FakeWriter:
     async def record_runtime_event(self, mode, processed_chats=0, inserted_messages=0, error=None):
         self.runtime_events.append((mode, processed_chats, inserted_messages, error))
 
+    async def touch_backfill_attempt(self, chat_id):
+        self.backfill_attempts.append(int(chat_id))
+        return True
+
+    async def mark_chat_inactive(self, chat_id):
+        self.inactivated_chats.append(int(chat_id))
+        return True
+
 
 # ── unit tests for pure helpers ───────────────────────────────────────────────
 def test_resolve_floor_prefers_last_backfill():
@@ -151,6 +162,32 @@ def test_resolve_floor_prefers_last_backfill():
 def test_resolve_floor_falls_back_to_last_seen():
     cursor = {"last_backfill_message_id": None, "last_seen_message_id": 500}
     assert _resolve_floor(cursor) == 500
+
+
+def test_selected_entity_cache_uses_one_dialog_scan_for_peer_forms():
+    class Entity:
+        id = 4315752802
+
+    class Dialog:
+        id = -1004315752802
+        entity = Entity()
+
+    class ResolverClient:
+        def __init__(self):
+            self.dialog_scans = 0
+
+        async def get_input_entity(self, _chat_id):
+            raise ValueError("cache miss")
+
+        async def iter_dialogs(self):
+            self.dialog_scans += 1
+            yield Dialog()
+
+    client = ResolverClient()
+    unresolved = run(_warm_selected_entity_cache(client, [-1004315752802]))
+
+    assert unresolved == set()
+    assert client.dialog_scans == 1
 
 
 def test_resolve_floor_returns_zero_when_no_cursor():
@@ -522,6 +559,44 @@ def test_message_empty_id_zero_excluded_from_min_id():
     assert res.floor_after == 5
 
 
+def test_failed_chat_rotates_without_claiming_completion():
+    writer = FakeWriter(
+        cursors={4041: {"last_backfill_message_id": 100}},
+        fail_chats={4041},
+    )
+    client = FakeClient(messages_by_chat={4041: [FakeMsg(99)]})
+
+    res = run(deep_backfill_one_chat(client, writer, 4041, "channel", per_run_limit=50))
+
+    assert "simulated write failure" in (res.error or "")
+    assert res.completed is False
+    assert writer.backfill_attempts == [4041]
+    assert not any(update[3] is True for update in writer.cursor_updates)
+
+
+def test_unresolvable_peer_is_inactivated_only_when_explicitly_enabled(monkeypatch):
+    class UnresolvableClient(FakeClient):
+        async def iter_messages(self, **_kwargs):
+            raise ValueError(
+                "Could not find the input entity for PeerChannel(channel_id=4315752802)"
+            )
+            yield  # pragma: no cover
+
+    monkeypatch.setenv("DEEP_BACKFILL_DEACTIVATE_UNRESOLVED", "true")
+    writer = FakeWriter(cursors={4315752802: {"last_backfill_message_id": 100}})
+    res = run(
+        deep_backfill_one_chat(
+            UnresolvableClient(), writer, 4315752802, "channel", per_run_limit=50
+        )
+    )
+
+    assert res.inactivated is True
+    assert res.completed is False
+    assert writer.inactivated_chats == [4315752802]
+    assert writer.backfill_attempts == []
+    assert "inaccessible chat inactivated" in (res.error or "")
+
+
 # ── T14: H1 — incremental cursor update после каждого batch ──────────────────
 def test_incremental_cursor_update_per_batch():
     """RCA H1: если процесс убьют между write и cursor-update, floor должен
@@ -844,3 +919,84 @@ def test_update_cursor_pg_uses_least_for_backfill_floor():
         f"expected LEAST in UPDATE for backfill floor monotonicity, got: {sql}"
     )
     assert "COALESCE" in sql
+
+
+def test_touch_backfill_attempt_updates_timestamp_only():
+    from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
+
+    captured: list[tuple[str, tuple]] = []
+
+    class FakeCursor:
+        def execute(self, sql, params):
+            captured.append((sql, params))
+
+        def close(self):
+            pass
+
+    class FakeConn:
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            pass
+
+    class ConnContext:
+        def __enter__(self):
+            return FakeConn()
+
+        def __exit__(self, *_args):
+            return False
+
+    writer = SupabaseWriter.__new__(SupabaseWriter)
+    writer.schema = "tg_test"
+    writer.telegram_user_id = "test_user"
+    writer._postgres_url = "postgres://test"
+    writer._pg_conn = lambda: ConnContext()
+    writer._ensure_chat_state_pg = lambda _conn, _chat_id: None
+
+    assert run(writer.touch_backfill_attempt(123)) is True
+    sql, params = captured[0]
+    assert "SET last_backfill_ts=%s" in sql
+    assert "last_backfill_message_id" not in sql
+    assert "backfill_completed" not in sql
+    assert params[1:] == ("test_user", "123")
+
+
+def test_mark_chat_inactive_does_not_claim_backfill_completion():
+    from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
+
+    captured: list[tuple[str, tuple]] = []
+
+    class FakeCursor:
+        def execute(self, sql, params):
+            captured.append((sql, params))
+
+        def close(self):
+            pass
+
+    class FakeConn:
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            pass
+
+    class ConnContext:
+        def __enter__(self):
+            return FakeConn()
+
+        def __exit__(self, *_args):
+            return False
+
+    writer = SupabaseWriter.__new__(SupabaseWriter)
+    writer.schema = "tg_test"
+    writer.telegram_user_id = "test_user"
+    writer._postgres_url = "postgres://test"
+    writer._pg_conn = lambda: ConnContext()
+    writer._ensure_chat_state_pg = lambda _conn, _chat_id: None
+
+    assert run(writer.mark_chat_inactive(321)) is True
+    sql, params = captured[0]
+    assert "is_active=FALSE" in sql
+    assert "backfill_completed" not in sql
+    assert params[1:] == ("test_user", "321")
