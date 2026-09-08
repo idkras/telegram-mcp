@@ -62,12 +62,12 @@ def test_rick_coposlly_keys_unchanged():
 
 
 @pytest.mark.parametrize("profile", ["default", "", "DEFAULT"])
-def test_default_profile_keys_unchanged(profile):
+def test_default_profile_uses_declared_registry_keys(profile):
     names = get_profile_credential_names(profile)
     assert names["api_id"] == "telegram_api_id"
     assert names["api_hash"] == "telegram_api_hash"
     assert names["session"] == "telegram_session"
-    assert names["phone"] is None
+    assert names["phone"] == "telegram_phone"
 
 
 # ── Universal convention: НОВЫЙ клиент = zero code change ──
