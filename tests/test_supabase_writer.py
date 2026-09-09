@@ -817,6 +817,159 @@ class TestSchemaPerProfile:
         assert SupabaseWriter(telegram_user_id="ikrasinsky").schema == "rick_messages_tasks"
 
 
+class TestOutboundPersistenceOrdering:
+    """An outbound row must exist before any newer live event can move the cursor."""
+
+    class Writer:
+        def __init__(self, *, fail_write=False, fail_cursor=False):
+            self.rows = set()
+            self.cursor = 0
+            self.calls = []
+            self.fail_write = fail_write
+            self.fail_cursor = fail_cursor
+
+        async def write_message(self, message, chat_id, chat_type, chat_title=None):
+            self.calls.append(("write", message.id))
+            if self.fail_write:
+                return False
+            self.rows.add((str(chat_id), message.id))
+            return True
+
+        async def update_chat_cursor(
+            self, chat_id, last_seen_message_id=None, **_kwargs
+        ):
+            self.calls.append(("cursor", last_seen_message_id))
+            if self.fail_cursor:
+                return False
+            assert (str(chat_id), last_seen_message_id) in self.rows
+            self.cursor = max(self.cursor, int(last_seen_message_id))
+            return True
+
+    @pytest.mark.asyncio
+    async def test_outbound_then_newer_inbound_has_no_cursor_hole(self):
+        from types import SimpleNamespace
+
+        from heroes_platform.heroes_telegram_mcp.event_handlers import (
+            persist_message_and_cursor,
+        )
+
+        writer = self.Writer()
+        outbound = SimpleNamespace(id=2975)
+        inbound = SimpleNamespace(id=2976)
+
+        assert (
+            await persist_message_and_cursor(
+                outbound, 10960494, "private", "Ilya", writer=writer
+            )
+            is None
+        )
+        assert ("10960494", 2975) in writer.rows
+        assert writer.cursor == 2975
+
+        assert (
+            await persist_message_and_cursor(
+                inbound, 10960494, "private", "Ilya", writer=writer
+            )
+            is None
+        )
+        assert writer.rows == {("10960494", 2975), ("10960494", 2976)}
+        assert writer.cursor == 2976
+        assert writer.calls == [
+            ("write", 2975),
+            ("cursor", 2975),
+            ("write", 2976),
+            ("cursor", 2976),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_failed_write_never_advances_cursor(self):
+        from types import SimpleNamespace
+
+        from heroes_platform.heroes_telegram_mcp.event_handlers import (
+            persist_message_and_cursor,
+        )
+
+        writer = self.Writer(fail_write=True)
+        failed_stage = await persist_message_and_cursor(
+            SimpleNamespace(id=2975),
+            10960494,
+            "private",
+            "Ilya",
+            writer=writer,
+        )
+
+        assert failed_stage == "message_write_failed"
+        assert writer.rows == set()
+        assert writer.cursor == 0
+        assert writer.calls == [("write", 2975)]
+
+    @pytest.mark.asyncio
+    async def test_failed_cursor_is_reported_after_row_exists(self):
+        from types import SimpleNamespace
+
+        from heroes_platform.heroes_telegram_mcp.event_handlers import (
+            persist_message_and_cursor,
+        )
+
+        writer = self.Writer(fail_cursor=True)
+        failed_stage = await persist_message_and_cursor(
+            SimpleNamespace(id=2975),
+            10960494,
+            "private",
+            "Ilya",
+            writer=writer,
+        )
+
+        assert failed_stage == "cursor_update_failed"
+        assert writer.rows == {("10960494", 2975)}
+        assert writer.cursor == 0
+        assert writer.calls == [("write", 2975), ("cursor", 2975)]
+
+    def test_main_send_persists_returned_message_in_laba_mode(self):
+        from pathlib import Path
+
+        source = (Path(__file__).parent.parent / "main.py").read_text()
+
+        assert "sent_message = await c.send_message" in source
+        assert "await persist_message_and_cursor(" in source
+        assert "do not resend the Telegram message" in source
+
+    def test_default_writer_profile_is_the_active_endpoint(self, monkeypatch):
+        from heroes_platform.heroes_telegram_mcp.event_handlers import canonical_profile
+
+        monkeypatch.setenv("TELEGRAM_USER", "lisa")
+        assert canonical_profile("default") == "lisa"
+        assert canonical_profile("lisa") == "lisa"
+
+    def test_ik_profile_aliases_share_one_schema(self, monkeypatch):
+        from heroes_platform.heroes_telegram_mcp.event_handlers import canonical_profile
+
+        monkeypatch.setenv("TELEGRAM_USER", "ik")
+        assert canonical_profile("default") == "ikrasinsky"
+        assert canonical_profile("ilyakrasinsky") == "ikrasinsky"
+
+    def test_main_client_selection_reuses_canonical_profile(self):
+        from pathlib import Path
+
+        source = (Path(__file__).parent.parent / "main.py").read_text()
+
+        assert "requested_profile = canonical_profile(profile)" in source
+
+    @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])
+    def test_laba_mode_accepts_systemd_truthy_spellings(self, monkeypatch, value):
+        from heroes_platform.heroes_telegram_mcp.event_handlers import env_flag_enabled
+
+        monkeypatch.setenv("LABA_MODE", value)
+        assert env_flag_enabled("LABA_MODE") is True
+
+    @pytest.mark.parametrize("value", ["", "0", "false", "no", "off"])
+    def test_laba_mode_rejects_falsey_spellings(self, monkeypatch, value):
+        from heroes_platform.heroes_telegram_mcp.event_handlers import env_flag_enabled
+
+        monkeypatch.setenv("LABA_MODE", value)
+        assert env_flag_enabled("LABA_MODE") is False
+
+
 class TestDbLoadGuardrails:
     def _bare_writer(self):
         from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter

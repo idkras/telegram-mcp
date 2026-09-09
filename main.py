@@ -93,7 +93,10 @@ from heroes_platform.shared.import_setup import enable
 enable(__file__)
 
 # ПОТОМ импортируем heroes_platform модули
-from credentials_registry.service_env import get_service_credentials
+try:
+    from credentials_registry.service_env import get_service_credentials
+except ImportError:  # standalone VPS bundle ships the guarded partner subset
+    from heroes_platform.credentials.service_env import get_service_credentials
 from heroes_platform.shared.logging_utils import add_rotating_file_handler
 
 # Honest CLI-probe helpers (pr-hero-i5i R2). Pure, dependency-free module next to
@@ -410,13 +413,15 @@ def _get_credentials_for_profile(profile: str) -> Optional[Dict[str, Any]]:
 
 
 async def _get_client_for_profile(profile: str) -> TelegramClient:
-    """Return the Telegram client for the given profile. 'default'/'ik'/'ikrasinsky' -> main client; 'lisa' -> lazy-created Lisa client."""
+    """Return the active endpoint client or an explicitly requested profile."""
     global _lisa_client
+    from heroes_platform.heroes_telegram_mcp.event_handlers import canonical_profile
+
     normalized = (profile or "default").strip().lower()
     active_profile = os.getenv("TELEGRAM_USER", "ikrasinsky").strip().lower()
     if active_profile in ("ik", "ilyakrasinsky"):
         active_profile = "ikrasinsky"
-    requested_profile = "ikrasinsky" if normalized in ("", "default", "ik", "ilyakrasinsky") else normalized
+    requested_profile = canonical_profile(profile)
     if requested_profile == active_profile:
         return client
     if os.getenv("TELEGRAM_MCP_SINGLE_PROFILE", "false").lower() == "true":
@@ -495,7 +500,9 @@ async def _run_runtime_healthcheck() -> tuple[Any, str]:
     verifies the session (connect + is_user_authorized); revoked → False; unable to
     probe → None (INCONCLUSIVE). LABA delegates to the Supabase probe as before.
     """
-    laba_mode = os.getenv("LABA_MODE") == "true"
+    from heroes_platform.heroes_telegram_mcp.event_handlers import env_flag_enabled
+
+    laba_mode = env_flag_enabled("LABA_MODE")
     return await main_cli_helpers.run_runtime_healthcheck(
         laba_mode=laba_mode,
         client=client,
@@ -762,8 +769,54 @@ async def send_message(chat_id: int, message: str, profile: str = "default") -> 
             await c.start()  # type: ignore
         entity = await _resolve_chat_entity(chat_id, tg_client=c)
         single_entity = ensure_single_entity(entity)
-        await c.send_message(single_entity, message)
+        sent_message = await c.send_message(single_entity, message)
         sent_as = await _sent_as_display(c)
+        from heroes_platform.heroes_telegram_mcp.event_handlers import env_flag_enabled
+
+        if env_flag_enabled("LABA_MODE"):
+            try:
+                from heroes_platform.heroes_telegram_mcp.event_handlers import (
+                    _get_chat_type,
+                    get_writer_for_profile,
+                    persist_message_and_cursor,
+                )
+
+                canonical_chat_id = utils.get_peer_id(single_entity)
+                chat_title = (
+                    getattr(single_entity, "title", None)
+                    or getattr(single_entity, "first_name", None)
+                    or getattr(single_entity, "username", None)
+                )
+                failed_stage = await persist_message_and_cursor(
+                    sent_message,
+                    canonical_chat_id,
+                    _get_chat_type(single_entity),
+                    chat_title,
+                    writer=get_writer_for_profile(profile),
+                )
+                if failed_stage:
+                    logger.error(
+                        "Telegram message %s sent to chat %s but Supabase persistence "
+                        "stopped at %s",
+                        getattr(sent_message, "id", "?"),
+                        canonical_chat_id,
+                        failed_stage,
+                    )
+                    return (
+                        f"Message sent successfully. Sent as: {sent_as}. "
+                        f"WARNING: Supabase mirror incomplete ({failed_stage}); "
+                        "do not resend the Telegram message."
+                    )
+            except Exception:
+                logger.exception(
+                    "Telegram message %s was sent but Supabase persistence raised",
+                    getattr(sent_message, "id", "?"),
+                )
+                return (
+                    f"Message sent successfully. Sent as: {sent_as}. "
+                    "WARNING: Supabase mirror raised an error; do not resend the "
+                    "Telegram message. Check mcp_errors.log for details."
+                )
         return f"Message sent successfully. Sent as: {sent_as}"
     except Exception as e:
         return log_and_format_error("send_message", e, chat_id=chat_id)
@@ -3391,7 +3444,9 @@ if __name__ == "__main__":
             await client.start()  # type: ignore
 
             # Register Supabase event handlers when running on laba
-            if os.getenv("LABA_MODE") == "true":
+            from heroes_platform.heroes_telegram_mcp.event_handlers import env_flag_enabled
+
+            if env_flag_enabled("LABA_MODE"):
                 # S1 preflight (RCA 2026-06-01): НЕ запускать listener на мёртвой
                 # сессии — иначе получаем zombie listener, который пишет 0 строк
                 # (ровно как 24 апр 2026: listener_boot processed 0 chats, а supabase

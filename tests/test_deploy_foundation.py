@@ -149,6 +149,12 @@ def test_main_http_endpoint_is_profile_pinned_and_loopback_by_default():
     assert "This endpoint is pinned to profile=" in main
 
 
+def test_main_keeps_standalone_partner_registry_import_fallback():
+    main = (DEPLOY.parent / "main.py").read_text()
+    assert "from credentials_registry.service_env import get_service_credentials" in main
+    assert "from heroes_platform.credentials.service_env import get_service_credentials" in main
+
+
 def test_listener_boot_marker_cannot_block_mcp_event_loop():
     handlers = (DEPLOY.parent / "event_handlers.py").read_text()
     assert "await asyncio.to_thread(_write_marker)" in handlers
