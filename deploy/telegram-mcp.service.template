@@ -3,6 +3,8 @@
 # Naming telegram-mcp-<profile> matches telegram_mcp_doctor.check_deploy_units +
 # telegram_endpoints.py fetch_vps_endpoint (SwitchBar). One process per account =
 # one long-lived Telethon session per endpoint (§Telegram session-per-endpoint).
+# Tool calls use profile=current (legacy alias: default), which resolves to the
+# stable __PROFILE__ identity. Explicitly naming another profile fails closed.
 [Unit]
 Description=Telegram MCP ingest listener (__PROFILE__) → Supabase
 After=network-online.target
@@ -14,15 +16,17 @@ StartLimitBurst=5
 Type=simple
 User=__USER__
 WorkingDirectory=__APP_DIR__
-# per-profile secrets (session string / TELEGRAM_USER / LABA_MODE) — NOT in git
-EnvironmentFile=/etc/telegram-mcp/env.d/__PROFILE__.env
+# Per-profile secrets are host-encrypted at rest. systemd materializes the
+# telegram_env credential only in the unit's private /run/credentials directory.
+LoadCredentialEncrypted=telegram_env:/etc/credstore.encrypted/telegram-mcp-__PROFILE__.env.cred
 Environment=PYTHONPATH=__APP_DIR__
 Environment=HEROES_CREDENTIALS_REGISTRY=__APP_DIR__/heroes_harness/credentials_registry.yaml
+Environment=TELEGRAM_USER=__PROFILE__
+Environment=LABA_MODE=true
 Environment=TELEGRAM_MCP_TRANSPORT=streamable-http
 Environment=TELEGRAM_MCP_HOST=127.0.0.1
 Environment=TELEGRAM_MCP_PORT=__MCP_PORT__
 Environment=TELEGRAM_MCP_PATH=/mcp
-Environment=TELEGRAM_MCP_SINGLE_PROFILE=true
 # Both profile units share the Supabase session-mode pool.  The writer runs
 # synchronously inside each asyncio process, so two connections per profile are
 # sufficient and prevent the two services from reserving 16 sessions together.
@@ -50,7 +54,7 @@ Environment=DEEP_BACKFILL_PER_CHAT_LIMIT=250
 Environment=DEEP_BACKFILL_SELECT_LIMIT=50
 Environment=DEEP_BACKFILL_DEACTIVATE_UNRESOLVED=true
 Environment=DEEP_BACKFILL_STARTUP_MAX_PASSES=200
-ExecStart=__APP_DIR__/.venv/bin/python listener.py
+ExecStart=__APP_DIR__/.venv/bin/python deploy/run-with-encrypted-credential.py __APP_DIR__/.venv/bin/python listener.py
 Restart=on-failure
 RestartSec=5
 # graceful shutdown: give Telethon time to flush + disconnect cleanly

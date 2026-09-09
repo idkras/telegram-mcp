@@ -14,7 +14,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
+from typing import Any, List, Optional, Union, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from telethon.tl.types import Message, TotalList, Channel, Chat, User, MessageReplyStoryHeader  # type: ignore
@@ -93,7 +93,10 @@ from heroes_platform.shared.import_setup import enable
 enable(__file__)
 
 # ПОТОМ импортируем heroes_platform модули
-from credentials_registry.service_env import get_service_credentials
+try:
+    from credentials_registry.service_env import get_service_credentials
+except ImportError:  # standalone VPS bundle ships the guarded partner subset
+    from heroes_platform.credentials.service_env import get_service_credentials
 from heroes_platform.shared.logging_utils import add_rotating_file_handler
 
 # Honest CLI-probe helpers (pr-hero-i5i R2). Pure, dependency-free module next to
@@ -390,61 +393,14 @@ else:
         TELEGRAM_SESSION_NAME or "telegram_session", TELEGRAM_API_ID, TELEGRAM_API_HASH
     )
 
-# Optional second client for profile "lisa" (lazy-initialized)
-_lisa_client: Optional[TelegramClient] = None
-
-
-def _get_credentials_for_profile(profile: str) -> Optional[Dict[str, Any]]:
-    """Return credentials for the given profile by temporarily setting TELEGRAM_USER. Used for multi-profile send (e.g. lisa)."""
-    if (profile or "").strip().lower() != "lisa":
-        return None
-    old = os.environ.get("TELEGRAM_USER")
-    try:
-        os.environ["TELEGRAM_USER"] = "lisa"
-        return get_service_credentials("telegram")
-    finally:
-        if old is None:
-            os.environ.pop("TELEGRAM_USER", None)
-        else:
-            os.environ["TELEGRAM_USER"] = old
-
-
 async def _get_client_for_profile(profile: str) -> TelegramClient:
-    """Return the Telegram client for the given profile. 'default'/'ik'/'ikrasinsky' -> main client; 'lisa' -> lazy-created Lisa client."""
-    global _lisa_client
-    normalized = (profile or "default").strip().lower()
-    active_profile = os.getenv("TELEGRAM_USER", "ikrasinsky").strip().lower()
-    if active_profile in ("ik", "ilyakrasinsky"):
-        active_profile = "ikrasinsky"
-    requested_profile = "ikrasinsky" if normalized in ("", "default", "ik", "ilyakrasinsky") else normalized
-    if requested_profile == active_profile:
-        return client
-    if os.getenv("TELEGRAM_MCP_SINGLE_PROFILE", "false").lower() == "true":
-        raise ValueError(
-            f"This endpoint is pinned to profile={active_profile}; "
-            f"use the {requested_profile} endpoint instead."
-        )
-    if normalized in ("", "default", "ik", "ikrasinsky", "ilyakrasinsky"):
-        return client
-    if normalized == "lisa":
-        if _lisa_client is None:
-            creds = _get_credentials_for_profile("lisa")
-            if not creds or not creds.get("TELEGRAM_API_HASH"):
-                raise ValueError(
-                    "Lisa profile credentials not configured. Check registry logical ids lisa_tg_*."
-                )
-            api_id = int(creds.get("TELEGRAM_API_ID", 0))
-            session_str = creds.get("TELEGRAM_SESSION_STRING")
-            if session_str:
-                _lisa_client = TelegramClient(
-                    StringSession(session_str), api_id, creds["TELEGRAM_API_HASH"]
-                )
-            else:
-                _lisa_client = TelegramClient(
-                    "telegram_session_lisa", api_id, creds["TELEGRAM_API_HASH"]
-                )
-        return _lisa_client
-    raise ValueError(f"Unknown profile: {profile!r}. Use 'default'/'ik' or 'lisa'.")
+    """Return this endpoint's sole client; reject every cross-profile request."""
+    from heroes_platform.heroes_telegram_mcp.event_handlers import (
+        require_endpoint_profile,
+    )
+
+    require_endpoint_profile(profile)
+    return client
 
 
 async def _run_auth_smoke_test(target_client: TelegramClient) -> tuple[bool, str]:
@@ -495,7 +451,9 @@ async def _run_runtime_healthcheck() -> tuple[Any, str]:
     verifies the session (connect + is_user_authorized); revoked → False; unable to
     probe → None (INCONCLUSIVE). LABA delegates to the Supabase probe as before.
     """
-    laba_mode = os.getenv("LABA_MODE") == "true"
+    from heroes_platform.heroes_telegram_mcp.event_handlers import env_flag_enabled
+
+    laba_mode = env_flag_enabled("LABA_MODE")
     return await main_cli_helpers.run_runtime_healthcheck(
         laba_mode=laba_mode,
         client=client,
@@ -748,13 +706,16 @@ async def get_messages(chat_id: int, page: int = 1, page_size: int = 20) -> str:
 
 
 @mcp.tool()
-async def send_message(chat_id: int, message: str, profile: str = "default") -> str:
+async def send_message(chat_id: int, message: str, profile: str = "current") -> str:
     """
     Send a message to a specific chat.
     Args:
         chat_id: The ID of the chat.
         message: The message content to send.
-        profile: Telegram account to send as: "default" or "ik"/"ikrasinsky" for main account, "lisa" for Lisa (@hello_liza_rickai). Response includes "Sent as: Name (@username)" so the active user is visible.
+        profile: Account on this endpoint. Use "current" (preferred) or omit it;
+            "default" remains a compatibility alias. Stable explicit identities are
+            "ikrasinsky" (alias "ik") and "lisa". A mismatched identity fails closed
+            on production endpoints. The response includes "Sent as" for readback.
     """
     try:
         c = await _get_client_for_profile(profile)
@@ -762,8 +723,54 @@ async def send_message(chat_id: int, message: str, profile: str = "default") -> 
             await c.start()  # type: ignore
         entity = await _resolve_chat_entity(chat_id, tg_client=c)
         single_entity = ensure_single_entity(entity)
-        await c.send_message(single_entity, message)
+        sent_message = await c.send_message(single_entity, message)
         sent_as = await _sent_as_display(c)
+        from heroes_platform.heroes_telegram_mcp.event_handlers import env_flag_enabled
+
+        if env_flag_enabled("LABA_MODE"):
+            try:
+                from heroes_platform.heroes_telegram_mcp.event_handlers import (
+                    _get_chat_type,
+                    get_writer_for_profile,
+                    persist_message_and_cursor,
+                )
+
+                canonical_chat_id = utils.get_peer_id(single_entity)
+                chat_title = (
+                    getattr(single_entity, "title", None)
+                    or getattr(single_entity, "first_name", None)
+                    or getattr(single_entity, "username", None)
+                )
+                failed_stage = await persist_message_and_cursor(
+                    sent_message,
+                    canonical_chat_id,
+                    _get_chat_type(single_entity),
+                    chat_title,
+                    writer=get_writer_for_profile(profile),
+                )
+                if failed_stage:
+                    logger.error(
+                        "Telegram message %s sent to chat %s but Supabase persistence "
+                        "stopped at %s",
+                        getattr(sent_message, "id", "?"),
+                        canonical_chat_id,
+                        failed_stage,
+                    )
+                    return (
+                        f"Message sent successfully. Sent as: {sent_as}. "
+                        f"WARNING: Supabase mirror incomplete ({failed_stage}); "
+                        "do not resend the Telegram message."
+                    )
+            except Exception:
+                logger.exception(
+                    "Telegram message %s was sent but Supabase persistence raised",
+                    getattr(sent_message, "id", "?"),
+                )
+                return (
+                    f"Message sent successfully. Sent as: {sent_as}. "
+                    "WARNING: Supabase mirror raised an error; do not resend the "
+                    "Telegram message. Check mcp_errors.log for details."
+                )
         return f"Message sent successfully. Sent as: {sent_as}"
     except Exception as e:
         return log_and_format_error("send_message", e, chat_id=chat_id)
@@ -2628,7 +2635,7 @@ async def mark_as_read(chat_id: int) -> str:
 
 @mcp.tool()
 async def reply_to_message(
-    chat_id: int, message_id: int, text: str, profile: str = "default"
+    chat_id: int, message_id: int, text: str, profile: str = "current"
 ) -> str:
     """
     Reply to a specific message in a chat.
@@ -2636,7 +2643,10 @@ async def reply_to_message(
         chat_id: The ID of the chat.
         message_id: The message ID to reply to.
         text: The reply text.
-        profile: Telegram account to send as: "default"/"ik" for main account, "lisa" for Lisa. Response includes "Sent as: Name (@username)".
+        profile: Account on this endpoint. Use "current" (preferred) or omit it;
+            "default" remains a compatibility alias. Explicit "ikrasinsky"/"ik" or
+            "lisa" must match a pinned production endpoint. The response includes
+            "Sent as" for readback.
     """
     try:
         c = await _get_client_for_profile(profile)
@@ -3391,7 +3401,9 @@ if __name__ == "__main__":
             await client.start()  # type: ignore
 
             # Register Supabase event handlers when running on laba
-            if os.getenv("LABA_MODE") == "true":
+            from heroes_platform.heroes_telegram_mcp.event_handlers import env_flag_enabled
+
+            if env_flag_enabled("LABA_MODE"):
                 # S1 preflight (RCA 2026-06-01): НЕ запускать listener на мёртвой
                 # сессии — иначе получаем zombie listener, который пишет 0 строк
                 # (ровно как 24 апр 2026: listener_boot processed 0 chats, а supabase

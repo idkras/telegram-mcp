@@ -6,7 +6,7 @@ Telegram MCP Server предоставляет полный доступ к Tele
 
 - 📱 Полный доступ к Telegram API (73+ инструментов)
 - 🔐 Безопасное хранение ключей в macOS Keychain
-- 👥 Поддержка множественных профилей (lisa, ik, ilyakrasinsky)
+- 👥 Один стабильный профиль на endpoint (`lisa` или `ikrasinsky`)
 - 🛠️ CLI команды для тестирования и отладки
 - 📊 Интеграция с Cursor IDE
 - 📋 Получение метаданных чатов (админы, владелец, участники, настройки истории)
@@ -32,6 +32,90 @@ pip install -r requirements.txt
 Используйте зарегистрированные logical ids `telegram_api_id`, `telegram_api_hash`,
 `telegram_session` и, когда нужен номер, `telegram_phone`;
 не обращайтесь к Keychain или Windows Credential Manager напрямую.
+
+### 2.1. Секреты sandbox-ik: Bitwarden + GPG + systemd credentials
+
+Для `sandbox-ik` действуют два разных слоя хранения одного payload:
+
+- portable backup/source for recovery — `config/sandbox-ik-<profile>.secrets.env.gpg`,
+  совместимый с Heromaton/Laba (`rickai/secrets`, symmetric GPG AES256,
+  Bitwarden item `Services secrets passphrase`);
+- VPS runtime — host-encrypted
+  `/etc/credstore.encrypted/telegram-mcp-<profile>.env.cred`, который systemd
+  расшифровывает только в `/run/credentials/<unit>/telegram_env` на время жизни
+  процесса.
+
+`TELEGRAM_USER` не входит в secret payload: профиль должен быть явно закреплён
+в unit (`lisa` или `ikrasinsky`). Поэтому один и тот же credential нельзя
+использовать как переключатель аккаунта.
+
+Production deploy использует чистый checkout
+`/home/idkras/telegram-mcp-production`. Исторический dirty checkout
+`/home/idkras/telegram-mcp` не сбрасывается и не обновляется поверх локальных
+hotfix-файлов. После merge сначала доставляется только код без изменения units:
+
+```bash
+deploy/deploy-sandbox-ik.sh --prepare-code-only
+```
+
+Полное переключение выполняется тем же скриптом только после установки и
+успешного readback обоих encrypted credentials.
+
+Первичная настройка Bitwarden и portable archive (пароль/ключи не вводить в чат):
+
+```bash
+./scripts/secrets-tool.sh init https://84.252.142.100
+cp config/sandbox-ik.secret-template.env config/sandbox-ik-lisa.secrets.env
+chmod 600 config/sandbox-ik-lisa.secrets.env
+$EDITOR config/sandbox-ik-lisa.secrets.env
+./scripts/secrets-tool.sh encrypt sandbox-ik-lisa
+./scripts/secrets-tool.sh clear sandbox-ik-lisa
+```
+
+Повторить для `sandbox-ik-ikrasinsky`. В Git добавляется только `.gpg`; файл
+`config/*.secrets.env` игнорируется. `just secrets ...` вызывает тот же wrapper,
+но `just` не является обязательной зависимостью. Wrapper намеренно не принимает
+`SECRETS_PASSPHRASE` из environment: interactive passphrase source — только
+Bitwarden; `init`, `encrypt` и `decrypt` без terminal TTY завершаются fail-closed.
+
+Миграция уже существующего root-only `/etc/telegram-mcp/env.d/<profile>.env`
+делается без вывода значений одной командой. Она создаёт portable `.gpg`, делает
+`clear → decrypt → cmp`, устанавливает host-encrypted credential и сохраняет
+legacy env до последующих runtime/Supabase readbacks:
+
+```bash
+./scripts/secrets-sandbox-ik-migrate.sh lisa sandbox-ik.infra.node.rickai.net
+```
+
+Systemd unit должен использовать:
+
+```ini
+LoadCredentialEncrypted=telegram_env:/etc/credstore.encrypted/telegram-mcp-lisa.env.cred
+Environment=TELEGRAM_USER=lisa
+ExecStart=/home/idkras/telegram-mcp-production/.venv/bin/python deploy/run-with-encrypted-credential.py /home/idkras/telegram-mcp-production/.venv/bin/python listener.py
+```
+
+Перед переключением units encrypted blob проверяется реальным
+`systemd-creds decrypt --name=telegram_env`, канонической структурой payload и
+полным набором обязательных ключей. Непустой, но повреждённый blob не проходит.
+
+Для IK в трёх местах заменить `lisa` на `ikrasinsky`. Удалять legacy `.env`
+можно только после четырёх независимых зелёных проверок: GPG decrypt, internal
+`systemd-creds` readback (`readback=match`), restart/health нужного profile unit,
+и физическая запись нового Telegram message в соответствующую Supabase schema.
+До этого legacy-файл — rollback source и не удаляется.
+
+При неудачном обновлении installer оставляет предыдущий encrypted blob с
+суффиксом `.rollback`. Откат не раскрывает plaintext:
+
+```bash
+sudo -n systemctl stop telegram-mcp-lisa.service
+sudo -n mv /etc/credstore.encrypted/telegram-mcp-lisa.env.cred \
+  /etc/credstore.encrypted/telegram-mcp-lisa.env.cred.failed
+sudo -n mv /etc/credstore.encrypted/telegram-mcp-lisa.env.cred.rollback \
+  /etc/credstore.encrypted/telegram-mcp-lisa.env.cred
+sudo -n systemctl start telegram-mcp-lisa.service
+```
 
 ### 3. Тестирование
 ```bash
@@ -126,11 +210,16 @@ git commit -m "chore: update heroes_telegram_mcp submodule ref"
 - `--list-tools` - Список инструментов
 - `--version` - Версия
 
-### Переключение профилей
-Измените `TELEGRAM_USER` в конфигурации MCP:
-- `"TELEGRAM_USER": "lisa"` - профиль lisa
-- `"TELEGRAM_USER": "ik"` - профиль ik
-- `"TELEGRAM_USER": "ilyakrasinsky"` - профиль ilyakrasinsky
+### Выбор профиля
+
+Профиль выбирается endpoint-ом, а не переключается внутри процесса:
+
+- `telegram-mcp-lisa` / port `8767` → `TELEGRAM_USER=lisa`;
+- `telegram-mcp-ikrasinsky` / port `8766` → `TELEGRAM_USER=ikrasinsky`.
+
+В tool call используйте `profile="current"` или не передавайте profile. Старый
+`default` остаётся только alias к текущему endpoint. Cross-profile запрос
+завершается ошибкой с именем нужного endpoint.
 
 ## Таблицы Supabase: ik_telegram_chats и rick_telegram_chats
 
