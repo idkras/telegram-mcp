@@ -37,7 +37,8 @@ except ImportError:  # плоский запуск с VPS (PYTHONPATH на па�
 
 # Only import Supabase writer when actually used
 _writer: Any = None
-_profile_writers: dict[str, Any] = {}
+_PROFILE_ALIASES = {"ik": "ikrasinsky", "ilyakrasinsky": "ikrasinsky"}
+_SUPPORTED_ENDPOINT_PROFILES = frozenset({"ikrasinsky", "lisa"})
 
 
 def env_flag_enabled(name: str) -> bool:
@@ -56,34 +57,52 @@ def _get_writer() -> Any:
     return _writer
 
 
-def canonical_profile(profile: str | None) -> str:
-    """Resolve tool aliases to the Supabase profile owning the Telegram session."""
-    normalized = (profile or "default").strip().lower()
+def active_endpoint_profile() -> str:
+    """Return the stable account identity assigned to this MCP endpoint."""
     active_profile = os.getenv("TELEGRAM_USER", "ikrasinsky").strip().lower()
-    aliases = {"ik": "ikrasinsky", "ilyakrasinsky": "ikrasinsky"}
-    active_profile = aliases.get(active_profile, active_profile)
-    if normalized in {"", "default"}:
+    return _PROFILE_ALIASES.get(active_profile, active_profile)
+
+
+def canonical_profile(profile: str | None) -> str:
+    """Resolve ``current``/legacy aliases to the endpoint's stable identity."""
+    normalized = (profile or "current").strip().lower()
+    active_profile = active_endpoint_profile()
+    if normalized in {"", "current", "default"}:
         return active_profile
-    return aliases.get(normalized, normalized)
+    return _PROFILE_ALIASES.get(normalized, normalized)
+
+
+def resolve_profile_request(profile: str | None) -> tuple[str, str]:
+    """Return ``(active, requested)`` identities or reject invented profiles."""
+    active_profile = active_endpoint_profile()
+    requested_profile = canonical_profile(profile)
+    if requested_profile not in _SUPPORTED_ENDPOINT_PROFILES:
+        raise ValueError(
+            f"Unknown Telegram profile {requested_profile!r}. Use 'current', "
+            "'ikrasinsky' (or 'ik'), or 'lisa'."
+        )
+    return active_profile, requested_profile
+
+
+def require_endpoint_profile(profile: str | None) -> str:
+    """Return the endpoint identity, rejecting all cross-account routing."""
+    active_profile, requested_profile = resolve_profile_request(profile)
+    if requested_profile != active_profile:
+        raise ValueError(
+            f"This endpoint is pinned to profile={active_profile}; "
+            f"use the telegram-mcp-{requested_profile} endpoint instead."
+        )
+    return active_profile
 
 
 # Backward-compatible private name used by existing tests and local callers.
 _canonical_profile = canonical_profile
 
 
-def get_writer_for_profile(profile: str | None = "default") -> Any:
+def get_writer_for_profile(profile: str | None = "current") -> Any:
     """Return the schema-scoped writer for the account used by ``send_message``."""
-    requested_profile = canonical_profile(profile)
-    active_profile = canonical_profile("default")
-    if requested_profile == active_profile:
-        return _get_writer()
-    if requested_profile not in _profile_writers:
-        from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
-
-        _profile_writers[requested_profile] = SupabaseWriter(
-            telegram_user_id=requested_profile
-        )
-    return _profile_writers[requested_profile]
+    require_endpoint_profile(profile)
+    return _get_writer()
 
 
 async def persist_message_and_cursor(

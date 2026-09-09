@@ -27,9 +27,12 @@ def test_unit_renders_valid_systemd():
     u = _render("ikrasinsky")
     for section in ("[Unit]", "[Service]", "[Install]"):
         assert section in u, section
-    assert "ExecStart=/home/idkras/telegram-mcp/.venv/bin/python listener.py" in u
-    assert "EnvironmentFile=/etc/telegram-mcp/env.d/ikrasinsky.env" in u
+    assert "LoadCredentialEncrypted=telegram_env:/etc/credstore.encrypted/telegram-mcp-ikrasinsky.env.cred" in u
+    assert "run-with-encrypted-credential.py /home/idkras/telegram-mcp/.venv/bin/python listener.py" in u
+    assert "EnvironmentFile=" not in u
     assert "Environment=PYTHONPATH=/home/idkras/telegram-mcp" in u
+    assert "Environment=TELEGRAM_USER=ikrasinsky" in u
+    assert "Environment=LABA_MODE=true" in u
     assert "WantedBy=multi-user.target" in u
     assert "SyslogIdentifier=telegram-mcp-ikrasinsky" in u  # journald, not /app/logs
     assert "Restart=on-failure" in u
@@ -51,8 +54,7 @@ def test_unit_no_unrendered_placeholders():
     left = re.findall(r"__[A-Z_]+__", u)
     assert left == [], f"unrendered placeholders: {left}"
     assert "telegram-mcp-lisa" in u  # profile rendered
-    # user is supplied via EnvironmentFile, not a hardcoded unit directive
-    assert not re.search(r"^TELEGRAM_USER=", u, re.M)
+    assert "Environment=TELEGRAM_USER=lisa" in u
 
 
 def test_deploy_script_bash_syntax_ok():
@@ -70,10 +72,12 @@ def test_deploy_dry_run_is_idempotent_and_touches_nothing():
     rc2, out2 = dry()
     assert rc1 == 0 and rc2 == 0
     assert out1 == out2, "dry-run not deterministic"
-    # both profile units + both env skeletons appear
+    # both profile units + encrypted credential preflights appear
     assert "telegram-mcp-ikrasinsky.service" in out1
     assert "telegram-mcp-lisa.service" in out1
-    assert "env.d/ikrasinsky.env" in out1 and "env.d/lisa.env" in out1
+    assert "telegram-mcp-ikrasinsky.env.cred" in out1
+    assert "telegram-mcp-lisa.env.cred" in out1
+    assert "env skeleton" not in out1
     # dry-run must not have executed a real systemctl start
     assert "DRY: sudo systemctl daemon-reload" in out1
 
@@ -133,8 +137,10 @@ def test_backfill_timer_is_bounded_and_resumable():
     assert "--deep-backfill-budget 1000" in service
     assert "--deep-backfill-per-chat 250" in service
     assert "--profile %i" in service
-    assert "EnvironmentFile=/etc/telegram-mcp/env.d/%i.env" in service
-    assert "HEROES_CREDENTIALS_REGISTRY=/home/idkras/telegram-mcp/heroes_harness/credentials_registry.yaml" in service
+    assert "LoadCredentialEncrypted=telegram_env:/etc/credstore.encrypted/telegram-mcp-%i.env.cred" in service
+    assert "run-with-encrypted-credential.py" in service
+    assert "EnvironmentFile=" not in service
+    assert "HEROES_CREDENTIALS_REGISTRY=/home/idkras/telegram-mcp-production/heroes_harness/credentials_registry.yaml" in service
     assert "SuccessExitStatus=2" not in service
     assert "OnUnitActiveSec=5min" in timer
     cli = (DEPLOY.parent / "scripts" / "deep_backfill_history.py").read_text()
@@ -144,9 +150,28 @@ def test_backfill_timer_is_bounded_and_resumable():
 
 def test_main_http_endpoint_is_profile_pinned_and_loopback_by_default():
     main = (DEPLOY.parent / "main.py").read_text()
+    unit = (DEPLOY / "telegram-mcp.service.template").read_text()
     assert 'os.getenv("TELEGRAM_MCP_HOST", "127.0.0.1")' in main
-    assert 'os.getenv("TELEGRAM_MCP_SINGLE_PROFILE", "false")' in main
-    assert "This endpoint is pinned to profile=" in main
+    handlers = (DEPLOY.parent / "event_handlers.py").read_text()
+    assert "This endpoint is pinned to profile=" in handlers
+    assert "use the telegram-mcp-{requested_profile} endpoint instead" in handlers
+    assert "TELEGRAM_MCP_SINGLE_PROFILE" not in main
+    assert "TELEGRAM_MCP_SINGLE_PROFILE" not in unit
+    assert "_lisa_client" not in main
+    assert "_get_credentials_for_profile" not in main
+
+
+def test_send_tools_prefer_current_not_ambiguous_default():
+    main = (DEPLOY.parent / "main.py").read_text()
+    assert 'profile: str = "current"' in main
+    assert '"default" remains a compatibility alias' in main
+    assert "require_endpoint_profile(profile)" in main
+
+
+def test_profile_resolver_maps_current_and_legacy_default_to_active_endpoint():
+    handlers = (DEPLOY.parent / "event_handlers.py").read_text()
+    assert 'normalized in {"", "current", "default"}' in handlers
+    assert "def active_endpoint_profile()" in handlers
 
 
 def test_main_keeps_standalone_partner_registry_import_fallback():

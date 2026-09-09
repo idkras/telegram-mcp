@@ -935,9 +935,14 @@ class TestOutboundPersistenceOrdering:
         assert "do not resend the Telegram message" in source
 
     def test_default_writer_profile_is_the_active_endpoint(self, monkeypatch):
-        from heroes_platform.heroes_telegram_mcp.event_handlers import canonical_profile
+        from heroes_platform.heroes_telegram_mcp.event_handlers import (
+            active_endpoint_profile,
+            canonical_profile,
+        )
 
         monkeypatch.setenv("TELEGRAM_USER", "lisa")
+        assert active_endpoint_profile() == "lisa"
+        assert canonical_profile("current") == "lisa"
         assert canonical_profile("default") == "lisa"
         assert canonical_profile("lisa") == "lisa"
 
@@ -945,15 +950,46 @@ class TestOutboundPersistenceOrdering:
         from heroes_platform.heroes_telegram_mcp.event_handlers import canonical_profile
 
         monkeypatch.setenv("TELEGRAM_USER", "ik")
+        assert canonical_profile("current") == "ikrasinsky"
         assert canonical_profile("default") == "ikrasinsky"
         assert canonical_profile("ilyakrasinsky") == "ikrasinsky"
 
-    def test_main_client_selection_reuses_canonical_profile(self):
+    def test_invented_default_lisa_profile_is_rejected(self, monkeypatch):
+        from heroes_platform.heroes_telegram_mcp.event_handlers import (
+            resolve_profile_request,
+        )
+
+        monkeypatch.setenv("TELEGRAM_USER", "lisa")
+        with pytest.raises(ValueError, match="Unknown Telegram profile 'default-lisa'"):
+            resolve_profile_request("default-lisa")
+
+    @pytest.mark.parametrize(
+        ("active", "requested", "expected_endpoint"),
+        [
+            ("lisa", "ik", "telegram-mcp-ikrasinsky"),
+            ("ikrasinsky", "lisa", "telegram-mcp-lisa"),
+        ],
+    )
+    def test_cross_profile_routing_always_fails_closed(
+        self, monkeypatch, active, requested, expected_endpoint
+    ):
+        from heroes_platform.heroes_telegram_mcp.event_handlers import (
+            get_writer_for_profile,
+            require_endpoint_profile,
+        )
+
+        monkeypatch.setenv("TELEGRAM_USER", active)
+        with pytest.raises(ValueError, match=expected_endpoint):
+            require_endpoint_profile(requested)
+        with pytest.raises(ValueError, match=expected_endpoint):
+            get_writer_for_profile(requested)
+
+    def test_main_client_selection_requires_endpoint_profile(self):
         from pathlib import Path
 
         source = (Path(__file__).parent.parent / "main.py").read_text()
 
-        assert "requested_profile = canonical_profile(profile)" in source
+        assert "require_endpoint_profile(profile)" in source
 
     @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])
     def test_laba_mode_accepts_systemd_truthy_spellings(self, monkeypatch, value):

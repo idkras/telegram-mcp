@@ -14,7 +14,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
+from typing import Any, List, Optional, Union, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from telethon.tl.types import Message, TotalList, Channel, Chat, User, MessageReplyStoryHeader  # type: ignore
@@ -393,63 +393,14 @@ else:
         TELEGRAM_SESSION_NAME or "telegram_session", TELEGRAM_API_ID, TELEGRAM_API_HASH
     )
 
-# Optional second client for profile "lisa" (lazy-initialized)
-_lisa_client: Optional[TelegramClient] = None
-
-
-def _get_credentials_for_profile(profile: str) -> Optional[Dict[str, Any]]:
-    """Return credentials for the given profile by temporarily setting TELEGRAM_USER. Used for multi-profile send (e.g. lisa)."""
-    if (profile or "").strip().lower() != "lisa":
-        return None
-    old = os.environ.get("TELEGRAM_USER")
-    try:
-        os.environ["TELEGRAM_USER"] = "lisa"
-        return get_service_credentials("telegram")
-    finally:
-        if old is None:
-            os.environ.pop("TELEGRAM_USER", None)
-        else:
-            os.environ["TELEGRAM_USER"] = old
-
-
 async def _get_client_for_profile(profile: str) -> TelegramClient:
-    """Return the active endpoint client or an explicitly requested profile."""
-    global _lisa_client
-    from heroes_platform.heroes_telegram_mcp.event_handlers import canonical_profile
+    """Return this endpoint's sole client; reject every cross-profile request."""
+    from heroes_platform.heroes_telegram_mcp.event_handlers import (
+        require_endpoint_profile,
+    )
 
-    normalized = (profile or "default").strip().lower()
-    active_profile = os.getenv("TELEGRAM_USER", "ikrasinsky").strip().lower()
-    if active_profile in ("ik", "ilyakrasinsky"):
-        active_profile = "ikrasinsky"
-    requested_profile = canonical_profile(profile)
-    if requested_profile == active_profile:
-        return client
-    if os.getenv("TELEGRAM_MCP_SINGLE_PROFILE", "false").lower() == "true":
-        raise ValueError(
-            f"This endpoint is pinned to profile={active_profile}; "
-            f"use the {requested_profile} endpoint instead."
-        )
-    if normalized in ("", "default", "ik", "ikrasinsky", "ilyakrasinsky"):
-        return client
-    if normalized == "lisa":
-        if _lisa_client is None:
-            creds = _get_credentials_for_profile("lisa")
-            if not creds or not creds.get("TELEGRAM_API_HASH"):
-                raise ValueError(
-                    "Lisa profile credentials not configured. Check registry logical ids lisa_tg_*."
-                )
-            api_id = int(creds.get("TELEGRAM_API_ID", 0))
-            session_str = creds.get("TELEGRAM_SESSION_STRING")
-            if session_str:
-                _lisa_client = TelegramClient(
-                    StringSession(session_str), api_id, creds["TELEGRAM_API_HASH"]
-                )
-            else:
-                _lisa_client = TelegramClient(
-                    "telegram_session_lisa", api_id, creds["TELEGRAM_API_HASH"]
-                )
-        return _lisa_client
-    raise ValueError(f"Unknown profile: {profile!r}. Use 'default'/'ik' or 'lisa'.")
+    require_endpoint_profile(profile)
+    return client
 
 
 async def _run_auth_smoke_test(target_client: TelegramClient) -> tuple[bool, str]:
@@ -755,13 +706,16 @@ async def get_messages(chat_id: int, page: int = 1, page_size: int = 20) -> str:
 
 
 @mcp.tool()
-async def send_message(chat_id: int, message: str, profile: str = "default") -> str:
+async def send_message(chat_id: int, message: str, profile: str = "current") -> str:
     """
     Send a message to a specific chat.
     Args:
         chat_id: The ID of the chat.
         message: The message content to send.
-        profile: Telegram account to send as: "default" or "ik"/"ikrasinsky" for main account, "lisa" for Lisa (@hello_liza_rickai). Response includes "Sent as: Name (@username)" so the active user is visible.
+        profile: Account on this endpoint. Use "current" (preferred) or omit it;
+            "default" remains a compatibility alias. Stable explicit identities are
+            "ikrasinsky" (alias "ik") and "lisa". A mismatched identity fails closed
+            on production endpoints. The response includes "Sent as" for readback.
     """
     try:
         c = await _get_client_for_profile(profile)
@@ -2681,7 +2635,7 @@ async def mark_as_read(chat_id: int) -> str:
 
 @mcp.tool()
 async def reply_to_message(
-    chat_id: int, message_id: int, text: str, profile: str = "default"
+    chat_id: int, message_id: int, text: str, profile: str = "current"
 ) -> str:
     """
     Reply to a specific message in a chat.
@@ -2689,7 +2643,10 @@ async def reply_to_message(
         chat_id: The ID of the chat.
         message_id: The message ID to reply to.
         text: The reply text.
-        profile: Telegram account to send as: "default"/"ik" for main account, "lisa" for Lisa. Response includes "Sent as: Name (@username)".
+        profile: Account on this endpoint. Use "current" (preferred) or omit it;
+            "default" remains a compatibility alias. Explicit "ikrasinsky"/"ik" or
+            "lisa" must match a pinned production endpoint. The response includes
+            "Sent as" for readback.
     """
     try:
         c = await _get_client_for_profile(profile)

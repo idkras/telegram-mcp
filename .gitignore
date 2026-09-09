@@ -129,6 +129,8 @@ celerybeat.pid
 
 # Environments
 .env
+config/*.secrets.env
+config/*.secrets.env.expected
 .venv
 env/
 venv/
