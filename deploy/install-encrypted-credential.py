@@ -18,49 +18,49 @@ import sys
 import uuid
 from pathlib import Path
 
-from encrypted_credential import PayloadError, parse_dotenv, serialize_dotenv
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:  # python -I does not add the script directory
+    sys.path.insert(0, str(HERE))
+
+from encrypted_credential import (  # noqa: E402
+    BASE_REQUIRED_SECRET_KEYS,
+    PayloadError,
+    parse_dotenv,
+    profile_key_set,
+    serialize_dotenv,
+    validate_profile_secrets,
+)
 
 
 CREDENTIAL_NAME = "telegram_env"
-REQUIRED_SECRET_KEYS = (
-    "TELEGRAM_API_ID",
-    "TELEGRAM_API_HASH",
-    "TELEGRAM_SESSION_STRING",
-    "SUPABASE_DB_URL",
-)
-OPTIONAL_SECRET_KEYS = (
-    "SUPABASE_API_KEY",
-    "SUPABASE_SERVICE_ROLE_KEY",
-)
-ALLOWED_SECRET_KEYS = frozenset(REQUIRED_SECRET_KEYS + OPTIONAL_SECRET_KEYS)
-# Accepted only as migration input and intentionally omitted from the encrypted
-# secret payload.  Stable endpoint identity/runtime tuning belongs to the unit.
-LEGACY_NONSECRET_KEYS = frozenset(("TELEGRAM_USER", "LABA_MODE", "SUPABASE_URL"))
+# Required by every profile; lisa additionally requires LISA_TG_* (see
+# encrypted_credential.PROFILE_KEY_SETS).  Kept for existing importers.
+REQUIRED_SECRET_KEYS = BASE_REQUIRED_SECRET_KEYS
 PROFILE_RE = re.compile(r"^[a-z0-9_]+$")
+CREDENTIAL_FILE_RE = re.compile(r"^telegram-mcp-([a-z0-9_]+)\.env\.cred$")
 
 
 class CredentialInstallError(RuntimeError):
     """Safe, value-blind installation failure."""
 
 
-def canonicalize_payload(raw: bytes) -> bytes:
-    """Validate a dotenv payload and return deterministic secret-only bytes."""
+def canonicalize_payload(raw: bytes, profile: str) -> bytes:
+    """Validate a dotenv payload against the profile key set; return secret-only bytes."""
 
     try:
         values = parse_dotenv(raw)
+        keyset = profile_key_set(profile)
+        secrets_only = validate_profile_secrets(values, profile, allow_legacy_nonsecret=True)
     except PayloadError as exc:
         raise CredentialInstallError(str(exc)) from exc
-    unknown = sorted(set(values) - ALLOWED_SECRET_KEYS - LEGACY_NONSECRET_KEYS)
-    if unknown:
-        raise CredentialInstallError("unknown secret keys: " + ",".join(unknown))
-    missing = sorted(
-        key for key in REQUIRED_SECRET_KEYS if not isinstance(values.get(key), str) or not values[key]
-    )
-    if missing:
-        raise CredentialInstallError("missing required secret keys: " + ",".join(missing))
+    return serialize_dotenv(secrets_only, keyset.ordered)
 
-    ordered = REQUIRED_SECRET_KEYS + OPTIONAL_SECRET_KEYS
-    return serialize_dotenv(values, ordered)
+
+def profile_from_credential_path(path: Path) -> str:
+    match = CREDENTIAL_FILE_RE.fullmatch(path.name)
+    if not match:
+        raise CredentialInstallError("cannot infer profile from credential file name")
+    return match.group(1)
 
 
 def _run_systemd_creds(
@@ -91,8 +91,11 @@ def install_credential(
 
     if not PROFILE_RE.fullmatch(profile):
         raise CredentialInstallError("profile must match [a-z0-9_]+")
-    canonical = canonicalize_payload(raw)
+    canonical = canonicalize_payload(raw, profile)
     output = output.resolve()
+    named = CREDENTIAL_FILE_RE.fullmatch(output.name)
+    if named and named.group(1) != profile:
+        raise CredentialInstallError("credential file name belongs to another profile")
     output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(output.parent, 0o700)
 
@@ -141,17 +144,19 @@ def _default_output(profile: str) -> Path:
 def verify_encrypted_credential(
     source: Path,
     *,
+    profile: str | None = None,
     systemd_creds: str = "systemd-creds",
 ) -> tuple[str, ...]:
     """Decrypt and validate an installed blob without printing secret values."""
 
     source = source.resolve()
+    profile = profile or profile_from_credential_path(source)
     if not source.is_file():
         raise CredentialInstallError("encrypted credential is missing")
     decrypted = _run_systemd_creds(systemd_creds, "decrypt", str(source), "-")
     if decrypted.returncode != 0:
         raise CredentialInstallError("encrypted credential decrypt failed")
-    canonical = canonicalize_payload(decrypted.stdout)
+    canonical = canonicalize_payload(decrypted.stdout, profile)
     if not hmac.compare_digest(canonical, decrypted.stdout):
         raise CredentialInstallError("encrypted credential payload is not canonical")
     values = parse_dotenv(canonical)
@@ -182,6 +187,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(
                 f"encrypted_credential={args.verify_encrypted.resolve()} "
+                f"profile={profile_from_credential_path(args.verify_encrypted.resolve())} "
                 f"readback=match keys={','.join(keys)}"
             )
             return 0
@@ -196,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"credential install refused: {exc}", file=sys.stderr)
         return 1
 
-    keys = ",".join(REQUIRED_SECRET_KEYS)
+    keys = ",".join(profile_key_set(args.profile).required)
     print(
         f"profile={args.profile} encrypted_credential={output} "
         f"readback=match required_keys={keys} "

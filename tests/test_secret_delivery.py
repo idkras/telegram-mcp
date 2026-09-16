@@ -84,10 +84,10 @@ def test_payload_parser_rejects_duplicate_and_invalid_lines():
 
 def test_installer_encrypts_verifies_atomically_and_keeps_encrypted_rollback(tmp_path):
     binary = _fake_systemd_creds(tmp_path)
-    output = tmp_path / "credstore" / "telegram-mcp-lisa.env.cred"
+    output = tmp_path / "credstore" / "telegram-mcp-ikrasinsky.env.cred"
 
     installed, rollback = installer.install_credential(
-        "lisa", _payload(), output, systemd_creds=str(binary)
+        "ikrasinsky", _payload(), output, systemd_creds=str(binary)
     )
     assert installed == output.resolve()
     assert rollback is None
@@ -96,7 +96,7 @@ def test_installer_encrypts_verifies_atomically_and_keeps_encrypted_rollback(tmp
 
     previous = output.read_bytes()
     _, rollback = installer.install_credential(
-        "lisa", _payload("replacement-session"), output, systemd_creds=str(binary)
+        "ikrasinsky", _payload("replacement-session"), output, systemd_creds=str(binary)
     )
     assert rollback and rollback.read_bytes() == previous
     assert stat.S_IMODE(rollback.stat().st_mode) == 0o600
@@ -104,15 +104,15 @@ def test_installer_encrypts_verifies_atomically_and_keeps_encrypted_rollback(tmp
 
 def test_installer_fails_closed_on_missing_or_unknown_keys(tmp_path):
     with pytest.raises(installer.CredentialInstallError, match="missing required secret keys"):
-        installer.canonicalize_payload(b"TELEGRAM_API_ID=test-only\n")
+        installer.canonicalize_payload(b"TELEGRAM_API_ID=test-only\n", "ikrasinsky")
     with pytest.raises(installer.CredentialInstallError, match="unknown secret keys"):
-        installer.canonicalize_payload(_payload() + b"PYTHONPATH=/untrusted\n")
+        installer.canonicalize_payload(_payload() + b"PYTHONPATH=/untrusted\n", "ikrasinsky")
 
 
 def test_installer_verifies_real_encrypted_payload_and_rejects_corruption(tmp_path):
     binary = _fake_systemd_creds(tmp_path)
-    output = tmp_path / "telegram-mcp-lisa.env.cred"
-    installer.install_credential("lisa", _payload(), output, systemd_creds=str(binary))
+    output = tmp_path / "telegram-mcp-ikrasinsky.env.cred"
+    installer.install_credential("ikrasinsky", _payload(), output, systemd_creds=str(binary))
     assert installer.verify_encrypted_credential(
         output, systemd_creds=str(binary)
     ) == installer.REQUIRED_SECRET_KEYS
@@ -124,7 +124,8 @@ def test_installer_verifies_real_encrypted_payload_and_rejects_corruption(tmp_pa
 
 def test_installer_strips_legacy_nonsecret_unit_settings():
     canonical = installer.canonicalize_payload(
-        _payload() + b"TELEGRAM_USER=lisa\nLABA_MODE=true\nSUPABASE_URL=https://example.invalid\n"
+        _payload() + b"TELEGRAM_USER=lisa\nLABA_MODE=true\nSUPABASE_URL=https://example.invalid\n",
+        "ikrasinsky",
     )
     assert b"TELEGRAM_USER" not in canonical
     assert b"LABA_MODE" not in canonical
@@ -132,7 +133,7 @@ def test_installer_strips_legacy_nonsecret_unit_settings():
 
 
 def test_normalizer_replaces_legacy_env_with_secret_only_mode_0600(tmp_path):
-    path = tmp_path / "sandbox-ik-lisa.secrets.env"
+    path = tmp_path / "sandbox-ik-ikrasinsky.secrets.env"
     path.write_bytes(_payload() + b"TELEGRAM_USER=lisa\nLABA_MODE=true\n")
     keys = normalizer.normalize_in_place(path)
     normalized = parse_dotenv(path.read_bytes())
@@ -144,9 +145,9 @@ def test_runtime_loader_reads_only_regular_credential_and_preserves_base_env(tmp
     credential_dir = tmp_path / "credentials"
     credential_dir.mkdir()
     credential = credential_dir / "telegram_env"
-    credential.write_bytes(installer.canonicalize_payload(_payload()))
-    env = runner.build_exec_environment(credential_dir, {"TELEGRAM_USER": "lisa"})
-    assert env["TELEGRAM_USER"] == "lisa"
+    credential.write_bytes(installer.canonicalize_payload(_payload(), "ikrasinsky"))
+    env = runner.build_exec_environment(credential_dir, {"TELEGRAM_USER": "ikrasinsky"})
+    assert env["TELEGRAM_USER"] == "ikrasinsky"
     assert env["TELEGRAM_SESSION_STRING"] == "test-only-session"
 
     credential.unlink()
@@ -154,7 +155,7 @@ def test_runtime_loader_reads_only_regular_credential_and_preserves_base_env(tmp
     target.write_bytes(_payload())
     credential.symlink_to(target)
     with pytest.raises(RuntimeError, match="missing or not a regular file"):
-        runner.build_exec_environment(credential_dir, {})
+        runner.build_exec_environment(credential_dir, {"TELEGRAM_USER": "ikrasinsky"})
 
 
 def test_portable_archive_contract_matches_laba_without_env_passphrase_override():
@@ -228,3 +229,86 @@ def test_systemd_units_use_only_encrypted_credentials():
     assert deploy.index('if [ "$PREPARE_CODE_ONLY" = 1 ]') < deploy.index(
         'import credentials_registry'
     )
+
+
+# ---------------------------------------------------------------------------
+# Profile-scoped key sets (critic finding H)
+# ---------------------------------------------------------------------------
+
+def _lisa_payload(session: str = "test-only-lisa-session") -> bytes:
+    return _payload(session) + (
+        "LISA_TG_API_KEY=test-only-id\n"
+        "LISA_TG_APP_HASH=test-only-hash\n"
+        f"LISA_TG_SESSION={session}\n"
+    ).encode()
+
+
+def test_ikrasinsky_profile_keeps_rick_api_key_and_drops_nonsecret_settings():
+    canonical = installer.canonicalize_payload(
+        _payload() + b"SUPABASE_RICK_API_KEY=test-only-rick\nTELEGRAM_USER=ikrasinsky\n"
+        b"LABA_MODE=1\nSUPABASE_URL=https://example.invalid\n",
+        "ikrasinsky",
+    )
+    assert tuple(parse_dotenv(canonical)) == installer.REQUIRED_SECRET_KEYS + ("SUPABASE_RICK_API_KEY",)
+
+
+@pytest.mark.parametrize("extra", [b"LISA_TG_SESSION=x\n", b"LD_PRELOAD=/tmp/x.so\n", b"SUPABASE_RICKAI_DB_URL=x\n"])
+def test_ikrasinsky_profile_refuses_keys_outside_its_set(extra):
+    with pytest.raises(installer.CredentialInstallError, match="unknown secret keys for profile ikrasinsky"):
+        installer.canonicalize_payload(_payload() + extra, "ikrasinsky")
+
+
+def test_lisa_profile_accepts_and_requires_lisa_tg_keys():
+    canonical = installer.canonicalize_payload(
+        _lisa_payload() + b"SUPABASE_RICK_API_KEY=test-only-rick\nTELEGRAM_USER=lisa\n", "lisa"
+    )
+    keys = tuple(parse_dotenv(canonical))
+    assert {"LISA_TG_API_KEY", "LISA_TG_APP_HASH", "LISA_TG_SESSION", "SUPABASE_RICK_API_KEY"} <= set(keys)
+    with pytest.raises(installer.CredentialInstallError,
+                       match="missing required secret keys for profile lisa: LISA_TG_API_KEY"):
+        installer.canonicalize_payload(_payload(), "lisa")
+
+
+def test_alias_keys_must_carry_identical_values():
+    diverged = _payload("new-session") + (
+        b"LISA_TG_API_KEY=test-only-id\nLISA_TG_APP_HASH=test-only-hash\nLISA_TG_SESSION=stale-session\n"
+    )
+    with pytest.raises(installer.CredentialInstallError, match="LISA_TG_SESSION,TELEGRAM_SESSION_STRING"):
+        installer.canonicalize_payload(diverged, "lisa")
+
+
+def test_unknown_profile_and_foreign_file_name_refuse(tmp_path):
+    with pytest.raises(installer.CredentialInstallError, match="no declared secret key set"):
+        installer.canonicalize_payload(_payload(), "mallory")
+    binary = _fake_systemd_creds(tmp_path)
+    with pytest.raises(installer.CredentialInstallError, match="belongs to another profile"):
+        installer.install_credential(
+            "ikrasinsky", _payload(), tmp_path / "telegram-mcp-lisa.env.cred", systemd_creds=str(binary)
+        )
+
+
+def test_verify_infers_profile_from_credential_file_name(tmp_path):
+    binary = _fake_systemd_creds(tmp_path)
+    output = tmp_path / "telegram-mcp-lisa.env.cred"
+    installer.install_credential("lisa", _lisa_payload(), output, systemd_creds=str(binary))
+    keys = installer.verify_encrypted_credential(output, systemd_creds=str(binary))
+    assert "LISA_TG_SESSION" in keys
+    with pytest.raises(installer.CredentialInstallError, match="cannot infer profile"):
+        installer.verify_encrypted_credential(tmp_path / "other.cred", systemd_creds=str(binary))
+
+
+def test_runtime_loader_is_profile_scoped(tmp_path):
+    credential_dir = tmp_path / "credentials"
+    credential_dir.mkdir()
+    credential = credential_dir / "telegram_env"
+    credential.write_bytes(installer.canonicalize_payload(_lisa_payload(), "lisa"))
+    env = runner.build_exec_environment(credential_dir, {"TELEGRAM_USER": "lisa"})
+    assert env["LISA_TG_SESSION"] == env["TELEGRAM_SESSION_STRING"] == "test-only-lisa-session"
+
+    with pytest.raises(RuntimeError, match="TELEGRAM_USER must name a runtime profile"):
+        runner.build_exec_environment(credential_dir, {})
+    with pytest.raises(RuntimeError, match="unknown secret keys for profile ikrasinsky"):
+        runner.build_exec_environment(credential_dir, {"TELEGRAM_USER": "ikrasinsky"})
+    credential.write_bytes(_payload() + b"LD_PRELOAD=/tmp/evil.so\n")
+    with pytest.raises(RuntimeError, match="unknown secret keys for profile ikrasinsky: LD_PRELOAD"):
+        runner.build_exec_environment(credential_dir, {"TELEGRAM_USER": "ikrasinsky"})

@@ -4,6 +4,8 @@
 Unlike ``source``/``EnvironmentFile``, dotenv values are data, never shell code.
 The credential is expected at ``$CREDENTIALS_DIRECTORY/telegram_env`` and is
 normally materialized by systemd under ``/run/credentials/<unit>/``.
+Only the secret key names declared for the unit's ``TELEGRAM_USER`` profile are
+exported; any other name (for example ``PYTHONPATH`` or ``LD_PRELOAD``) refuses.
 """
 
 from __future__ import annotations
@@ -12,32 +14,38 @@ import os
 import sys
 from pathlib import Path
 
-from encrypted_credential import PayloadError, parse_dotenv
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:  # python -I does not add the script directory
+    sys.path.insert(0, str(HERE))
 
-
-CREDENTIAL_NAME = "telegram_env"
-REQUIRED_KEYS = (
-    "TELEGRAM_API_ID",
-    "TELEGRAM_API_HASH",
-    "TELEGRAM_SESSION_STRING",
-    "SUPABASE_DB_URL",
+from encrypted_credential import (  # noqa: E402
+    BASE_REQUIRED_SECRET_KEYS,
+    RUNTIME_PROFILES,
+    PayloadError,
+    parse_dotenv,
+    validate_profile_secrets,
 )
 
 
+CREDENTIAL_NAME = "telegram_env"
+REQUIRED_KEYS = BASE_REQUIRED_SECRET_KEYS  # lisa additionally requires LISA_TG_*
+
+
 def build_exec_environment(credential_dir: Path, base: dict[str, str]) -> dict[str, str]:
+    profile = base.get("TELEGRAM_USER", "")
+    if profile not in RUNTIME_PROFILES:
+        raise RuntimeError("TELEGRAM_USER must name a runtime profile with a declared key set")
     directory = credential_dir.resolve(strict=True)
     credential = directory / CREDENTIAL_NAME
     if credential.is_symlink() or not credential.is_file():
         raise RuntimeError("telegram_env credential is missing or not a regular file")
     try:
         values = parse_dotenv(credential.read_bytes())
+        secrets_only = validate_profile_secrets(values, profile, allow_legacy_nonsecret=False)
     except PayloadError as exc:
-        raise RuntimeError(str(exc)) from exc
-    missing = [key for key in REQUIRED_KEYS if not values.get(key)]
-    if missing:
-        raise RuntimeError("telegram_env is missing required keys: " + ",".join(missing))
+        raise RuntimeError(f"telegram_env is invalid: {exc}") from exc
     result = dict(base)
-    result.update(values)
+    result.update(secrets_only)
     return result
 
 

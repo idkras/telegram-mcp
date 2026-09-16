@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -14,6 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER_PATH = ROOT / "deploy" / "install-encrypted-credential.py"
 sys.path.insert(0, str(INSTALLER_PATH.parent))
+ARCHIVE_NAME_RE = re.compile(r"^sandbox-ik-([a-z0-9_]+)\.secrets\.env$")
 
 
 def _load_installer():
@@ -25,9 +27,14 @@ def _load_installer():
     return module
 
 
-def normalize_in_place(path: Path) -> tuple[str, ...]:
+def normalize_in_place(path: Path, profile: str | None = None) -> tuple[str, ...]:
     installer = _load_installer()
-    canonical = installer.canonicalize_payload(path.read_bytes())
+    if profile is None:
+        match = ARCHIVE_NAME_RE.fullmatch(path.name)
+        if not match:
+            raise ValueError("cannot infer profile from file name; pass --profile")
+        profile = match.group(1)
+    canonical = installer.canonicalize_payload(path.read_bytes(), profile)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.new")
     try:
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -40,15 +47,16 @@ def normalize_in_place(path: Path) -> tuple[str, ...]:
     finally:
         if temporary.exists():
             temporary.unlink()
-    return installer.REQUIRED_SECRET_KEYS
+    return tuple(installer.profile_key_set(profile).required)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", type=Path)
+    parser.add_argument("--profile")
     args = parser.parse_args()
     try:
-        keys = normalize_in_place(args.path)
+        keys = normalize_in_place(args.path, args.profile)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"secret normalization refused: {exc}", file=sys.stderr)
         return 1
