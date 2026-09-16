@@ -1,0 +1,7 @@
+# Exact pins for the root-owned venv /usr/local/lib/telegram-secure-qr-login/venv.
+# Same versions as the listener venv; installed with --no-deps so nothing else is pulled.
+Telethon==1.44.0
+pyaes==1.6.1
+rsa==4.9.1
+pyasn1==0.6.3
+qrcode==8.2

@@ -1,0 +1,8 @@
+#!/bin/sh
+# Root-only entrypoint for deploy/secure-qr-login.py (installed as /usr/local/sbin/telegram-secure-qr-login).
+# - interpreter and packages come from a root-owned venv (no /home venv, no user site);
+# - python -I: isolated mode (ignores PYTHON* env, no user site, no script/cwd dir on sys.path);
+# - env -i: scrubbed environment; PATH only needs systemd-creds and systemctl.
+exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  /usr/local/lib/telegram-secure-qr-login/venv/bin/python -I -B \
+  /usr/local/lib/telegram-secure-qr-login/secure-qr-login.py "$@"
