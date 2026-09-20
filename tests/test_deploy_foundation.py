@@ -95,9 +95,11 @@ def test_env_example_has_required_keys_and_no_secrets():
 
 def test_deploy_requires_canonical_harness_credential_runtime():
     script = SCRIPT.read_text()
+    requirements = (DEPLOY.parent / "requirements.txt").read_text()
     assert "-r '$APP_DIR/requirements.txt' -r '$APP_DIR/requirements-laba.txt'" in script
     assert "import credentials_registry" in script
     assert "deploy through Heroes Harness" in script
+    assert "PyYAML>=6.0.2,<7.0.0" in requirements
     standalone = DEPLOY / "standalone"
     for rel in (
         "heroes_harness/credentials_registry.yaml", "heroes_platform/credentials/__init__.py",
