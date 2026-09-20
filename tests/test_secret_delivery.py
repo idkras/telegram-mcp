@@ -156,6 +156,9 @@ def test_runtime_loader_reads_only_regular_credential_and_preserves_base_env(tmp
     assert env["TELEGRAM_USER"] == "lisa"
     assert env["TELEGRAM_SESSION_STRING"] == "test-only-session"
     assert env["TELEGRAM_SESSION"] == "test-only-session"
+    assert env["LISA_TG_API_KEY"] == "test-only-id"
+    assert env["LISA_TG_APP_HASH"] == "test-only-hash"
+    assert env["LISA_TG_SESSION"] == "test-only-session"
 
     credential.unlink()
     target = tmp_path / "other"
@@ -163,6 +166,19 @@ def test_runtime_loader_reads_only_regular_credential_and_preserves_base_env(tmp
     credential.symlink_to(target)
     with pytest.raises(RuntimeError, match="missing or not a regular file"):
         runner.build_exec_environment(credential_dir, {})
+
+
+def test_runtime_loader_does_not_export_lisa_aliases_for_ik(tmp_path):
+    credential_dir = tmp_path / "credentials"
+    credential_dir.mkdir()
+    (credential_dir / "telegram_env").write_bytes(installer.canonicalize_payload(_payload()))
+
+    env = runner.build_exec_environment(credential_dir, {"TELEGRAM_USER": "ikrasinsky"})
+
+    assert env["TELEGRAM_SESSION"] == "test-only-session"
+    assert "LISA_TG_API_KEY" not in env
+    assert "LISA_TG_APP_HASH" not in env
+    assert "LISA_TG_SESSION" not in env
 
 
 def test_portable_archive_contract_matches_laba_without_env_passphrase_override():

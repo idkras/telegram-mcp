@@ -43,6 +43,13 @@ def build_exec_environment(credential_dir: Path, base: dict[str, str]) -> dict[s
     # process-local names from the same encrypted value so registry resolution
     # never falls back to a stale plaintext EnvironmentFile.
     result["TELEGRAM_SESSION"] = values["TELEGRAM_SESSION_STRING"]
+    # The Lisa registry entry predates the canonical TELEGRAM_* names.  Keep
+    # those aliases process-local and derive them from the same encrypted
+    # payload; do not duplicate them inside the credential or a plaintext env.
+    if result.get("TELEGRAM_USER", "").strip().lower() == "lisa":
+        result["LISA_TG_API_KEY"] = values["TELEGRAM_API_ID"]
+        result["LISA_TG_APP_HASH"] = values["TELEGRAM_API_HASH"]
+        result["LISA_TG_SESSION"] = values["TELEGRAM_SESSION_STRING"]
     return result
 
 
