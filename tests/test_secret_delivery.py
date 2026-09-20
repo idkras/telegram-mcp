@@ -155,6 +155,7 @@ def test_runtime_loader_reads_only_regular_credential_and_preserves_base_env(tmp
     env = runner.build_exec_environment(credential_dir, {"TELEGRAM_USER": "lisa"})
     assert env["TELEGRAM_USER"] == "lisa"
     assert env["TELEGRAM_SESSION_STRING"] == "test-only-session"
+    assert env["TELEGRAM_SESSION"] == "test-only-session"
 
     credential.unlink()
     target = tmp_path / "other"

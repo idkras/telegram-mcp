@@ -38,6 +38,11 @@ def build_exec_environment(credential_dir: Path, base: dict[str, str]) -> dict[s
         raise RuntimeError("telegram_env is missing required keys: " + ",".join(missing))
     result = dict(base)
     result.update(values)
+    # The canonical registry keeps TELEGRAM_SESSION as a legacy input alias,
+    # while deployed services consume TELEGRAM_SESSION_STRING.  Export both
+    # process-local names from the same encrypted value so registry resolution
+    # never falls back to a stale plaintext EnvironmentFile.
+    result["TELEGRAM_SESSION"] = values["TELEGRAM_SESSION_STRING"]
     return result
 
 
