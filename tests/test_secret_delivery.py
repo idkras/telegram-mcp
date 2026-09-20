@@ -109,6 +109,13 @@ def test_installer_fails_closed_on_missing_or_unknown_keys(tmp_path):
         installer.canonicalize_payload(_payload() + b"PYTHONPATH=/untrusted\n")
 
 
+def test_installer_accepts_registry_supabase_api_key_alias():
+    canonical = installer.canonicalize_payload(
+        _payload() + b"SUPABASE_RICK_API_KEY=test-only-api-key\n"
+    )
+    assert parse_dotenv(canonical)["SUPABASE_RICK_API_KEY"] == "test-only-api-key"
+
+
 def test_installer_verifies_real_encrypted_payload_and_rejects_corruption(tmp_path):
     binary = _fake_systemd_creds(tmp_path)
     output = tmp_path / "telegram-mcp-lisa.env.cred"
