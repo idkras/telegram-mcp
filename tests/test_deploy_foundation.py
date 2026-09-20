@@ -100,6 +100,7 @@ def test_deploy_requires_canonical_harness_credential_runtime():
     assert "import credentials_registry" in script
     assert "deploy through Heroes Harness" in script
     assert "PyYAML>=6.0.2,<7.0.0" in requirements
+    assert "mcp[cli]>=1.4.1,<2.0.0" in requirements
     standalone = DEPLOY / "standalone"
     for rel in (
         "heroes_harness/credentials_registry.yaml", "heroes_platform/credentials/__init__.py",
