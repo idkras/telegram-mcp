@@ -436,6 +436,52 @@ class TestPartialBatchCursorSafety:
         writer.update_chat_cursor.assert_awaited_once_with("123", last_seen_message_id=20)
 
     @pytest.mark.asyncio
+    async def test_catch_up_advances_cursor_when_guardian_skips_whole_batch(self):
+        """Incident: an intentional policy skip is handled, not a partial DB write."""
+        from heroes_platform.heroes_telegram_mcp.supabase_writer import (
+            BatchWriteCount,
+            SupabaseWriter,
+        )
+
+        writer = SupabaseWriter.__new__(SupabaseWriter)
+        writer.batch_size = 10
+        writer.get_chat_cursor = AsyncMock(return_value={"last_seen_message_id": 10})
+        writer.update_chat_cursor = AsyncMock(return_value=True)
+
+        async def policy_skip(batch, chat_id, chat_type="unknown", chat_title=None):
+            return BatchWriteCount(0, skipped=len(batch))
+
+        writer.write_messages_batch = policy_skip
+
+        written = await writer.catch_up_recent(self.Client(), "123", limit=10)
+
+        assert written == 0
+        writer.update_chat_cursor.assert_awaited_once_with("123", last_seen_message_id=20)
+
+    @pytest.mark.asyncio
+    async def test_catch_up_still_blocks_cursor_when_eligible_row_is_missing(self):
+        """Negative control: policy skips must not hide a real eligible-row failure."""
+        from heroes_platform.heroes_telegram_mcp.supabase_writer import (
+            BatchWriteCount,
+            SupabaseWriter,
+        )
+
+        writer = SupabaseWriter.__new__(SupabaseWriter)
+        writer.batch_size = 10
+        writer.get_chat_cursor = AsyncMock(return_value={"last_seen_message_id": 10})
+        writer.update_chat_cursor = AsyncMock(return_value=True)
+
+        async def one_missing(batch, chat_id, chat_type="unknown", chat_title=None):
+            return BatchWriteCount(4, skipped=5)  # handled=9 of 10
+
+        writer.write_messages_batch = one_missing
+
+        written = await writer.catch_up_recent(self.Client(), "123", limit=10)
+
+        assert written == 4
+        writer.update_chat_cursor.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_catch_up_uses_preloaded_cursor_without_second_select(self):
         from heroes_platform.heroes_telegram_mcp.supabase_writer import SupabaseWriter
 
