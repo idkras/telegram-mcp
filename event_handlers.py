@@ -37,6 +37,13 @@ except ImportError:  # плоский запуск с VPS (PYTHONPATH на па�
 
 # Only import Supabase writer when actually used
 _writer: Any = None
+_PROFILE_ALIASES = {"ik": "ikrasinsky", "ilyakrasinsky": "ikrasinsky"}
+_SUPPORTED_ENDPOINT_PROFILES = frozenset({"ikrasinsky", "lisa"})
+
+
+def env_flag_enabled(name: str) -> bool:
+    """Accept the conventional truthy spellings used by env files and systemd."""
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _get_writer() -> Any:
@@ -48,6 +55,85 @@ def _get_writer() -> Any:
         telegram_user = os.getenv("TELEGRAM_USER", "ikrasinsky")
         _writer = SupabaseWriter(telegram_user_id=telegram_user)
     return _writer
+
+
+def active_endpoint_profile() -> str:
+    """Return the stable account identity assigned to this MCP endpoint."""
+    active_profile = os.getenv("TELEGRAM_USER", "ikrasinsky").strip().lower()
+    return _PROFILE_ALIASES.get(active_profile, active_profile)
+
+
+def canonical_profile(profile: str | None) -> str:
+    """Resolve ``current``/legacy aliases to the endpoint's stable identity."""
+    normalized = (profile or "current").strip().lower()
+    active_profile = active_endpoint_profile()
+    if normalized in {"", "current", "default"}:
+        return active_profile
+    return _PROFILE_ALIASES.get(normalized, normalized)
+
+
+def resolve_profile_request(profile: str | None) -> tuple[str, str]:
+    """Return ``(active, requested)`` identities or reject invented profiles."""
+    active_profile = active_endpoint_profile()
+    requested_profile = canonical_profile(profile)
+    if requested_profile not in _SUPPORTED_ENDPOINT_PROFILES:
+        raise ValueError(
+            f"Unknown Telegram profile {requested_profile!r}. Use 'current', "
+            "'ikrasinsky' (or 'ik'), or 'lisa'."
+        )
+    return active_profile, requested_profile
+
+
+def require_endpoint_profile(profile: str | None) -> str:
+    """Return the endpoint identity, rejecting all cross-account routing."""
+    active_profile, requested_profile = resolve_profile_request(profile)
+    if requested_profile != active_profile:
+        raise ValueError(
+            f"This endpoint is pinned to profile={active_profile}; "
+            f"use the telegram-mcp-{requested_profile} endpoint instead."
+        )
+    return active_profile
+
+
+# Backward-compatible private name used by existing tests and local callers.
+_canonical_profile = canonical_profile
+
+
+def get_writer_for_profile(profile: str | None = "current") -> Any:
+    """Return the schema-scoped writer for the account used by ``send_message``."""
+    require_endpoint_profile(profile)
+    return _get_writer()
+
+
+async def persist_message_and_cursor(
+    message: Any,
+    chat_id: int | str,
+    chat_type: str,
+    chat_title: str | None,
+    *,
+    writer: Any | None = None,
+) -> str | None:
+    """Persist one Telegram message before advancing its monotonic cursor.
+
+    Returns ``None`` on full success, otherwise the failed stage.  In particular,
+    a failed write must never advance ``last_seen_message_id`` past a missing row.
+    """
+    target_writer = writer or _get_writer()
+    written = await target_writer.write_message(
+        message,
+        chat_id,
+        chat_type,
+        chat_title,
+    )
+    if not written:
+        return "message_write_failed"
+    cursor_updated = await target_writer.update_chat_cursor(
+        chat_id,
+        last_seen_message_id=message.id,
+    )
+    if not cursor_updated:
+        return "cursor_update_failed"
+    return None
 
 
 def _get_chat_type(chat: Any) -> str:
@@ -112,14 +198,18 @@ def register_event_handlers(client: Any) -> None:
                 or getattr(chat, "username", None)
             )
 
-            writer = _get_writer()
-            success = await writer.write_message(message, chat_id, chat_type, chat_title)
-
-            if success:
-                # Update last_seen cursor
-                await writer.update_chat_cursor(
+            failed_stage = await persist_message_and_cursor(
+                message,
+                chat_id,
+                chat_type,
+                chat_title,
+            )
+            if failed_stage:
+                logger.error(
+                    "NewMessage persistence incomplete for chat %s message %s: %s",
                     chat_id,
-                    last_seen_message_id=message.id,
+                    message.id,
+                    failed_stage,
                 )
         except Exception as exc:
             logger.error("Error handling new message: %s", exc, exc_info=True)

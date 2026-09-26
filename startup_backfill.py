@@ -238,7 +238,8 @@ async def _seed_recent(
             return True
         n = await writer.write_messages_batch(batch, chat_id, chat_type, chat_title)
         written += n
-        if n < len(batch):
+        handled = int(getattr(n, "handled", int(n)))
+        if handled < len(batch):
             logger.warning(
                 "Seed partial write for chat %s: wrote %d/%d; cursor not advanced for this batch",
                 chat_id,

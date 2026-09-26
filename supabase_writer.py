@@ -155,6 +155,30 @@ TABLE_ARTICLES = "telegram_articles"
 TABLE_CHATS = "telegram_chats"
 TABLE_CHAT_STATE = "telegram_chat_state"
 TABLE_RUNS = "telegram_ingest_runs"
+
+
+class BatchWriteCount(int):
+    """Backward-compatible batch result with an explicit handled count.
+
+    The integer value remains the number of rows accepted by Supabase.  Policy
+    skips are intentionally not rows, but they are handled outcomes: forward
+    and historical cursors may advance past them without treating the batch as
+    a failed/partial write.
+    """
+
+    def __new__(cls, written: int, *, skipped: int = 0) -> "BatchWriteCount":
+        value = int(written)
+        result = super().__new__(cls, value)
+        result.written = value
+        result.skipped = max(0, int(skipped))
+        result.handled = result.written + result.skipped
+        return result
+
+
+def _batch_fully_handled(result: int, observed: int) -> bool:
+    """True when every observed message was written or policy-skipped."""
+
+    return int(getattr(result, "handled", int(result))) >= observed
 LISTENER_RUNTIME_MODES = ("listener_boot", "listener_heartbeat")
 
 
@@ -1329,10 +1353,12 @@ class SupabaseWriter:
         """Write a batch of Telethon messages to Supabase.
 
         Returns:
-            Number of successfully written messages.
+            ``BatchWriteCount`` whose integer value is the number of accepted
+            rows and whose ``handled`` attribute also includes policy skips.
+            It remains an ``int`` for existing callers.
         """
         if not messages:
-            return 0
+            return BatchWriteCount(0)
 
         self._record_ingest_outcome(observed=len(messages))
 
@@ -1343,7 +1369,7 @@ class SupabaseWriter:
         ]
         if not rows:  # all messages skipped by guardian (blacklisted chat)
             self._record_ingest_outcome(skipped=len(messages))
-            return 0
+            return BatchWriteCount(0, skipped=len(messages))
         skipped = max(0, len(messages) - len(rows))
         if skipped:
             self._record_ingest_outcome(skipped=skipped)
@@ -1357,7 +1383,8 @@ class SupabaseWriter:
                             self._index_articles(conn, rows)
                         return written
 
-                return await asyncio.to_thread(_write_batch)
+                written = await asyncio.to_thread(_write_batch)
+                return BatchWriteCount(written, skipped=skipped)
             self._table(TABLE_MESSAGES).upsert(
                 rows,
                 on_conflict="chat_id,message_id",
@@ -1365,7 +1392,7 @@ class SupabaseWriter:
             self._record_accepted_keys(rows)
             self._index_articles(None, rows)
             self._record_ingest_outcome(accepted=len(rows), accepted_unknown=len(rows))
-            return len(rows)
+            return BatchWriteCount(len(rows), skipped=skipped)
         except Exception as exc:
             logger.warning(
                 "Batch write failed for chat %s (%d msgs): %s",
@@ -1375,7 +1402,7 @@ class SupabaseWriter:
             )
             if self._postgres_url:
                 self._record_ingest_outcome(failed=len(rows))
-                return 0
+                return BatchWriteCount(0, skipped=skipped)
             # Fall back to individual writes (REST only)
             ok = 0
             for msg in messages:
@@ -1388,7 +1415,7 @@ class SupabaseWriter:
                 accepted_unknown=ok,
                 failed=max(0, len(rows) - ok),
             )
-            return ok
+            return BatchWriteCount(ok, skipped=skipped)
 
     # ------------------------------------------------------------------
     # Chat registry management
@@ -2138,7 +2165,7 @@ class SupabaseWriter:
                         chat_title,
                     )
                     total_written += written
-                    if written < len(batch):
+                    if not _batch_fully_handled(written, len(batch)):
                         partial_write = True
                         logger.warning(
                             "Backfill partial write for chat %s: wrote %d/%d; cursor not advanced",
@@ -2154,7 +2181,7 @@ class SupabaseWriter:
             if batch and not partial_write:
                 written = await self.write_messages_batch(batch, chat_id, chat_type, chat_title)
                 total_written += written
-                if written < len(batch):
+                if not _batch_fully_handled(written, len(batch)):
                     partial_write = True
                     logger.warning(
                         "Backfill partial write for chat %s: wrote %d/%d; cursor not advanced",
@@ -2223,7 +2250,7 @@ class SupabaseWriter:
                         chat_title,
                     )
                     total_written += written
-                    if written < len(batch):
+                    if not _batch_fully_handled(written, len(batch)):
                         partial_write = True
                         logger.warning(
                             "Recent catch-up partial write for chat %s: wrote %d/%d; cursor not advanced",
@@ -2243,7 +2270,7 @@ class SupabaseWriter:
                     chat_title,
                 )
                 total_written += written
-                if written < len(batch):
+                if not _batch_fully_handled(written, len(batch)):
                     partial_write = True
                     logger.warning(
                         "Recent catch-up partial write for chat %s: wrote %d/%d; cursor not advanced",

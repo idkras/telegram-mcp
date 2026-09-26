@@ -8,23 +8,30 @@
 #
 # Usage (on sandbox-ik, or via ssh):
 #   deploy/deploy-sandbox-ik.sh [--profiles ikrasinsky,lisa] [--dry-run]
+#   deploy/deploy-sandbox-ik.sh --prepare-code-only
 #
-# Secrets are NOT baked in: each /etc/telegram-mcp/env.d/<profile>.env is created
-# from *.env.example (Keychain key NAMES) and must be filled with the real
-# TELEGRAM_SESSION_STRING per endpoint (owner does SMS re-auth once — §session-per-endpoint).
+# Secrets are NOT baked in and plaintext EnvironmentFile is forbidden. Each
+# profile must already have a host-encrypted systemd credential installed at
+# /etc/credstore.encrypted/telegram-mcp-<profile>.env.cred via the reviewed
+# Bitwarden/GPG migration workflow before this deploy starts the unit.
 set -euo pipefail
 
 REPO_URL="${TELEGRAM_MCP_REPO:-https://github.com/idkras/telegram-mcp.git}"
 APP_USER="${TELEGRAM_MCP_USER:-idkras}"
-APP_DIR="${TELEGRAM_MCP_APP_DIR:-/home/$APP_USER/telegram-mcp}"
-ENV_DIR="/etc/telegram-mcp/env.d"
+# Production lives in a clean release checkout. The historical
+# /home/idkras/telegram-mcp tree may contain operator hotfix evidence and is
+# never reset or pulled by this deploy path.
+APP_DIR="${TELEGRAM_MCP_APP_DIR:-/home/$APP_USER/telegram-mcp-production}"
+CREDENTIAL_DIR="/etc/credstore.encrypted"
 PROFILES="ikrasinsky,lisa"
 DRY_RUN=0
+PREPARE_CODE_ONLY=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --profiles) PROFILES="$2"; shift 2 ;;
     --dry-run)  DRY_RUN=1; shift ;;
+    --prepare-code-only) PREPARE_CODE_ONLY=1; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -74,6 +81,11 @@ log "install deps"
 run "'$APP_DIR/.venv/bin/pip' install -q --upgrade pip"
 run "'$APP_DIR/.venv/bin/pip' install -q -r '$APP_DIR/requirements.txt' -r '$APP_DIR/requirements-laba.txt'"
 
+if [ "$PREPARE_CODE_ONLY" = 1 ]; then
+  log "prepared code and dependencies only; units and credentials unchanged"
+  exit 0
+fi
+
 # Credential runtime and metadata are deliberately not vendored here. This
 # service must be deployed by Heroes Harness, which installs the canonical
 # 0-credentials-registry skill and its profile registry before this script.
@@ -83,20 +95,20 @@ elif ! "$APP_DIR/.venv/bin/python" -c 'import credentials_registry' >/dev/null 2
   _die "credentials_registry runtime missing; deploy through Heroes Harness"
 fi
 
-# 3. per-profile env skeleton (does NOT overwrite an existing filled env)
-run "sudo mkdir -p '$ENV_DIR'"
+# 3. Require the already-installed encrypted credential for each profile.
+# Deploy never creates a plaintext env skeleton and never reads secret values.
+run "sudo mkdir -p -m 700 '$CREDENTIAL_DIR'"
 IFS=',' read -r -a PROF_ARR <<< "$PROFILES"
 for p in "${PROF_ARR[@]}"; do
-  ex="$HERE/env.d/${p}.env.example"
-  [ -f "$ex" ] || ex="$HERE/env.d/profile.env.example"
-  tgt="$ENV_DIR/${p}.env"
+  cred="$CREDENTIAL_DIR/telegram-mcp-${p}.env.cred"
   if [ "$DRY_RUN" = 1 ]; then
-    echo "DRY: install env skeleton $tgt (from $(basename "$ex"))"
-  elif [ -f "$tgt" ]; then
-    log "env $tgt exists — keep (не перезаписываю secrets)"
+    echo "DRY: require encrypted credential $cred"
+  elif sudo "$APP_DIR/.venv/bin/python" \
+      "$APP_DIR/deploy/install-encrypted-credential.py" \
+      --verify-encrypted "$cred" >/dev/null; then
+    log "encrypted credential verified for $p"
   else
-    sudo cp "$ex" "$tgt"; sudo chmod 600 "$tgt"
-    log "env skeleton created $tgt — FILL TELEGRAM_SESSION_STRING (owner SMS re-auth)"
+    _die "encrypted credential failed readback for $p; run the Bitwarden/GPG migration first"
   fi
 done
 
@@ -126,14 +138,17 @@ for p in "${PROF_ARR[@]}"; do
   # Historical catch-up is now inside the same process/client as live ingest.
   # Disable the legacy second-session timer if an older deploy left it behind.
   run "sudo systemctl disable --now telegram-mcp-backfill@${p}.timer 2>/dev/null || true"
-  # only start if env has a session string (else it would crash-loop pre-auth)
+  # Start only when the encrypted payload exists; the unit/runtime validates
+  # required keys without printing values and fails closed on malformed input.
   if [ "$DRY_RUN" = 1 ]; then
-    echo "DRY: start telegram-mcp-${p} if TELEGRAM_SESSION_STRING present"
-  elif sudo grep -q "^TELEGRAM_SESSION_STRING=.\+" "$ENV_DIR/${p}.env" 2>/dev/null; then
+    echo "DRY: start telegram-mcp-${p} if encrypted credential present"
+  elif sudo "$APP_DIR/.venv/bin/python" \
+      "$APP_DIR/deploy/install-encrypted-credential.py" \
+      --verify-encrypted "$CREDENTIAL_DIR/telegram-mcp-${p}.env.cred" >/dev/null; then
     sudo systemctl restart "telegram-mcp-${p}.service"
     log "started telegram-mcp-${p}"
   else
-    log "telegram-mcp-${p} NOT started — env has no TELEGRAM_SESSION_STRING yet (owner re-auth pending)"
+    log "telegram-mcp-${p} NOT started — encrypted credential missing"
   fi
 done
 
