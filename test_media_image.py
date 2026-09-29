@@ -43,7 +43,7 @@ async def test_photo_is_delivered_as_mcp_image_not_server_path(monkeypatch):
     monkeypatch.setattr(main, "_resolve_chat_entity", fake_resolve)
 
     blocks = await main.mcp.call_tool(
-        "get_media_image", {"chat_id": 1827468065, "message_id": 12424}
+        "get_media_image", {"chat_id": 123456789, "message_id": 42}
     )
 
     assert len(blocks) == 1
