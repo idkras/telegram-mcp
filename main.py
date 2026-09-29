@@ -69,7 +69,7 @@ if TYPE_CHECKING:
 import nest_asyncio  # type: ignore
 import telethon.errors.rpcerrorlist  # type: ignore
 from dotenv import load_dotenv  # type: ignore
-from mcp.server.fastmcp import FastMCP  # type: ignore
+from mcp.server.fastmcp import FastMCP, Image  # type: ignore
 from telethon import TelegramClient, functions, utils  # type: ignore
 from telethon.sessions import StringSession  # type: ignore
 from telethon.tl.types import (  # type: ignore
@@ -1755,6 +1755,74 @@ async def download_media(chat_id: int, message_id: int, file_path: str) -> str:
             chat_id=chat_id,
             message_id=message_id,
             file_path=file_path,
+        )
+
+
+MAX_INLINE_IMAGE_BYTES = 8 * 1024 * 1024
+
+
+def _image_mime_from_bytes(data: bytes) -> str | None:
+    """Only return image formats understood by MCP image clients."""
+    if data.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "gif"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
+@mcp.tool()
+async def get_media_image(chat_id: int, message_id: int):
+    """Return a Telegram photo or image document as an MCP image, without a server file path.
+
+    Args:
+        chat_id: Chat containing the image.
+        message_id: Message containing the image.
+    """
+    try:
+        entity = await _resolve_chat_entity(chat_id, tg_client=client)
+        msg = await client.get_messages(entity, ids=message_id)
+        if not msg or not getattr(msg, "media", None):
+            return "No media found in the specified message."
+
+        photo = getattr(msg, "photo", None)
+        document = getattr(msg, "document", None)
+        if photo:
+            sizes = []
+            for item in getattr(photo, "sizes", []):
+                sizes.extend(
+                    value
+                    for value in [getattr(item, "size", None), *getattr(item, "sizes", [])]
+                    if isinstance(value, int)
+                )
+            declared_size = max(sizes, default=None)
+        elif document and getattr(document, "mime_type", "") in {
+            "image/jpeg", "image/png", "image/gif", "image/webp"
+        }:
+            declared_size = getattr(document, "size", None)
+        else:
+            return "The specified message does not contain a supported image."
+
+        if not isinstance(declared_size, int) or declared_size < 1:
+            return "Image size is unknown; refusing an unbounded download."
+        if declared_size > MAX_INLINE_IMAGE_BYTES:
+            return f"Image exceeds the {MAX_INLINE_IMAGE_BYTES} byte inline limit."
+
+        data = await client.download_media(msg, file=bytes)
+        if not isinstance(data, bytes) or not data:
+            return "Image download failed."
+        if len(data) > MAX_INLINE_IMAGE_BYTES:
+            return f"Image exceeds the {MAX_INLINE_IMAGE_BYTES} byte inline limit."
+        image_format = _image_mime_from_bytes(data)
+        if image_format is None:
+            return "Downloaded media is not a supported image."
+        return Image(data=data, format=image_format)
+    except Exception as e:
+        return log_and_format_error(
+            "get_media_image", e, chat_id=chat_id, message_id=message_id
         )
 
 
