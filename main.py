@@ -111,6 +111,7 @@ from heroes_platform.heroes_telegram_mcp.chat_search_utils import (
     analyze_chat_messages_for_bots_impl,
     json_serializer as chat_search_json_serializer,
 )
+from heroes_platform.heroes_telegram_mcp.local_file_upload import UploadStore, send_verified_upload
 
 
 def json_serializer(obj):
@@ -1724,6 +1725,60 @@ async def send_file(chat_id: int, file_path: str, caption: str | None = None) ->
         return log_and_format_error(
             "send_file", e, chat_id=chat_id, file_path=file_path, caption=caption
         )
+
+
+@mcp.tool()
+async def begin_file_upload(filename: str, size_bytes: int, sha256: str) -> dict:
+    """Reserve a private upload on this endpoint; the caller must transfer bytes separately.
+
+    A path on the caller's computer is never a path on the Telegram server.
+    Only a safe basename, byte size, and SHA-256 are accepted here.
+    """
+    return UploadStore().begin(filename, size_bytes, sha256)
+
+
+@mcp.tool()
+async def append_file_upload(upload_id: str, offset: int, chunk_base64: str) -> dict:
+    """Append one bounded base64 chunk to an upload at the exact byte offset."""
+    return UploadStore().append(upload_id, offset, chunk_base64)
+
+
+@mcp.tool()
+async def complete_file_upload(upload_id: str) -> dict:
+    """Verify the uploaded byte count and SHA-256 before it can be sent."""
+    return UploadStore().complete(upload_id)
+
+
+@mcp.tool()
+async def get_file_upload_status(upload_id: str) -> dict:
+    """Return a safe status and any delivery receipt without returning file bytes."""
+    return UploadStore().status(upload_id)
+
+
+@mcp.tool()
+async def send_uploaded_file(
+    chat_id: int,
+    upload_id: str,
+    caption: str | None = None,
+    expected_profile: str = "lisa",
+) -> dict:
+    """Send a verified staged document from this named Telegram endpoint.
+
+    A retry after an ambiguous Telegram failure is refused to avoid sending a
+    client the same document twice.  Inspect the chat and upload status first.
+    """
+    from heroes_platform.heroes_telegram_mcp.event_handlers import require_endpoint_profile
+
+    active_profile = require_endpoint_profile(expected_profile)
+    return await send_verified_upload(
+        store=UploadStore(),
+        telegram_client=client,
+        resolve_chat=_resolve_chat_entity,
+        chat_id=chat_id,
+        upload_id=upload_id,
+        caption=caption,
+        profile=active_profile,
+    )
 
 
 @mcp.tool()

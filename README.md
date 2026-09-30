@@ -141,6 +141,39 @@ python3 main.py --list-tools
 где запущен Telegram MCP. Путь на компьютере вызывающего клиента (например,
 `C:\\Users\\...`) не переносит файл на этот компьютер.
 
+### 3.2. Локальный файл в Telegram через Lisa
+
+`send_file(chat_id, file_path)` по-прежнему принимает путь **на сервере**.
+Для PDF или другого файла на компьютере сотрудника локальный агент читает байты и
+вызывает на endpoint Lisa четыре инструмента по порядку:
+
+```text
+begin_file_upload(filename, size_bytes, sha256) -> upload_id, max_chunk_bytes
+append_file_upload(upload_id, offset, chunk_base64) -> received_bytes  [повторить]
+complete_file_upload(upload_id) -> filename, size_bytes, sha256, state=ready
+send_uploaded_file(chat_id, upload_id, caption, expected_profile="lisa")
+  -> chat_id, message_id, filename, size_bytes, readback_confirmed
+```
+
+На компьютере с настроенным SSH alias `sandbox-ik` тот же маршрут доступен через
+локальный загрузчик из рабочего checkout:
+
+```bash
+python3 .agents/skills/3-telegram-send-route-preflight/scripts/telegram_mcp_call.py \
+  --profile lisa --upload-local-file '/absolute/local/path/offer.pdf'
+# После проверки адресата добавить: --chat-id <Telegram chat ID> --caption '...'
+```
+
+Без `--chat-id` файл только загружается и проверяется; сообщение не создаётся.
+С `--chat-id` загрузчик отправляет документ и завершает работу с кодом 0 только
+после совпадения `message_id`, имени и размера в Telegram readback. Код 2 после
+отправки означает, что readback не подтвердил документ: сначала проверьте чат и
+`get_file_upload_status(upload_id)`, не отправляйте тот же файл повторно вслепую.
+Байты файла не попадают в аргументы или историю shell-команды и не возвращаются
+в MCP-ответе; локальный путь указан в команде загрузчика.
+Загрузка ограничена 64 МиБ на файл, часть — 256 КиБ; временные байты доступны
+только пользователю сервиса и удаляются после отправки или истечения срока.
+
 ### 4. Получение метаданных чатов
 
 #### Новые MCP инструменты для анализа чатов:

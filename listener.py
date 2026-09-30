@@ -11,12 +11,23 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from contextlib import suppress
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
 from credentials_registry.service_env import get_service_credentials
 from heroes_platform.heroes_telegram_mcp.event_handlers import register_event_handlers
+from heroes_platform.heroes_telegram_mcp.local_file_upload import UploadStore
+
+
+async def _upload_cleanup_loop() -> None:
+    while True:
+        try:
+            UploadStore().cleanup_expired()
+        except Exception as error:
+            print(f"Telegram MCP upload cleanup failed: {type(error).__name__}", file=sys.stderr)
+        await asyncio.sleep(15 * 60)
 
 
 async def run_listener() -> None:
@@ -56,7 +67,13 @@ async def run_listener() -> None:
                 f"({profile})",
                 file=sys.stderr,
             )
-            await telegram_mcp.mcp.run_streamable_http_async()
+            cleanup_task = asyncio.create_task(_upload_cleanup_loop())
+            try:
+                await telegram_mcp.mcp.run_streamable_http_async()
+            finally:
+                cleanup_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await cleanup_task
         else:
             await client.run_until_disconnected()
     finally:
