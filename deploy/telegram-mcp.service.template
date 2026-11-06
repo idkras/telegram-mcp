@@ -15,6 +15,14 @@ StartLimitBurst=5
 [Service]
 Type=simple
 User=__USER__
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -/run/containerd/containerd.sock
 WorkingDirectory=__APP_DIR__
 # Per-profile secrets are host-encrypted at rest. systemd materializes the
 # telegram_env credential only in the unit's private /run/credentials directory.

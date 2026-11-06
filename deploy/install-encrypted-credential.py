@@ -71,9 +71,10 @@ def _run_systemd_creds(
     destination: str,
     *,
     payload: bytes | None = None,
+    credential_name: str = CREDENTIAL_NAME,
 ) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(
-        [binary, action, f"--name={CREDENTIAL_NAME}", source, destination],
+        [binary, action, f"--name={credential_name}", source, destination],
         input=payload,
         stdout=subprocess.PIPE if destination == "-" else subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -87,12 +88,16 @@ def install_credential(
     output: Path,
     *,
     systemd_creds: str = "systemd-creds",
+    credential_name: str = CREDENTIAL_NAME,
+    canonicalizer=None,
 ) -> tuple[Path, Path | None]:
     """Encrypt, verify, and atomically install one profile credential."""
 
     if not PROFILE_RE.fullmatch(profile):
         raise CredentialInstallError("profile must match [a-z0-9_]+")
-    canonical = canonicalize_payload(raw)
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", credential_name):
+        raise CredentialInstallError("unsafe credential name")
+    canonical = (canonicalizer or canonicalize_payload)(raw)
     output = output.resolve()
     output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(output.parent, 0o700)
@@ -102,14 +107,15 @@ def install_credential(
     had_previous = output.exists()
     try:
         encrypted = _run_systemd_creds(
-            systemd_creds, "encrypt", "-", str(temporary), payload=canonical
+            systemd_creds, "encrypt", "-", str(temporary), payload=canonical,
+            credential_name=credential_name,
         )
         if encrypted.returncode != 0 or not temporary.is_file():
             raise CredentialInstallError("systemd-creds encrypt failed")
         os.chmod(temporary, 0o600)
 
         decrypted = _run_systemd_creds(
-            systemd_creds, "decrypt", str(temporary), "-"
+            systemd_creds, "decrypt", str(temporary), "-", credential_name=credential_name
         )
         if decrypted.returncode != 0 or not hmac.compare_digest(decrypted.stdout, canonical):
             raise CredentialInstallError("encrypted credential readback mismatch")

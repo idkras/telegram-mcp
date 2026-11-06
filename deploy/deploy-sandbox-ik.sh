@@ -60,6 +60,20 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 TEMPLATE="$HERE/telegram-mcp.service.template"
 [ -f "$TEMPLATE" ] || { echo "missing $TEMPLATE" >&2; exit 1; }
 
+# Mandatory audit is inside the deploy route, independent of agent hooks.
+AUDIT=/usr/local/lib/heroes-vps-audit/audit_vps.py
+if [ "$DRY_RUN" = 1 ]; then
+  echo "DRY: require root-owned audit; preflight runtime UID; audit active units before and after deploy"
+else
+  sudo -n python3 -c 'import os,stat,sys;p=sys.argv[1];s=os.stat(p);assert s.st_uid==0 and not s.st_mode & 0o022 and stat.S_ISREG(s.st_mode)' "$AUDIT" || _die "trusted VPS audit missing"
+  sudo -n python3 "$AUDIT" --local --preflight-user "$APP_USER" || _die "runtime UID must have no sudo/docker privileges"
+  for p in "${_PROF_CHECK[@]}"; do
+    if systemctl is-active --quiet "telegram-mcp-${p}.service"; then
+      sudo -n python3 "$AUDIT" --local --service "telegram-mcp-${p}.service" --role telegram || _die "before audit failed for $p"
+    fi
+  done
+fi
+
 # 1. code: clone or pull (idempotent)
 if [ -d "$APP_DIR/.git" ]; then
   log "pull latest into $APP_DIR"
@@ -146,6 +160,7 @@ for p in "${PROF_ARR[@]}"; do
       "$APP_DIR/deploy/install-encrypted-credential.py" \
       --verify-encrypted "$CREDENTIAL_DIR/telegram-mcp-${p}.env.cred" >/dev/null; then
     sudo systemctl restart "telegram-mcp-${p}.service"
+    sudo -n python3 "$AUDIT" --local --service "telegram-mcp-${p}.service" --role telegram || _die "post-deploy audit failed for $p"
     log "started telegram-mcp-${p}"
   else
     log "telegram-mcp-${p} NOT started — encrypted credential missing"
