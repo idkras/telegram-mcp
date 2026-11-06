@@ -40,9 +40,17 @@ def get_chat_type(entity: Any) -> str:
     return "unknown"
 
 
+def display_name(entity: Any) -> str:
+    """Preserve group titles; include both parts of a person's saved name."""
+    return getattr(entity, "title", None) or " ".join(
+        part for part in (getattr(entity, "first_name", None),
+                          getattr(entity, "last_name", None)) if part
+    )
+
+
 def format_chat_info(entity: Any, dialog: Any = None) -> dict[str, Any]:
     """Форматировать информацию о чате в словарь"""
-    title = getattr(entity, "title", None) or getattr(entity, "first_name", "")
+    title = display_name(entity)
     chat_type = get_chat_type(entity)
 
     chat_info = {
@@ -73,44 +81,44 @@ async def search_chats_by_keyword_impl(
 
     Args:
         client: TelegramClient instance
-        keyword: Keyword to search for in chat titles
+        keyword: Text to search for in titles, full saved names or usernames
         chat_type: Filter by chat type ('user', 'group', 'channel', or None for all)
         limit: Maximum number of chats to return (None for all)
         max_dialogs_to_scan: Stop iterating after this many dialogs (default 500); None = no cap
 
     Returns:
-        Dictionary with search results
+        Results plus conservative scan_complete and stop_reason coverage.
     """
-    keyword_lower = keyword.lower()
+    if not keyword.strip().lstrip("@").strip():
+        raise ValueError("keyword must contain search text")
+    if limit is not None and limit <= 0:
+        raise ValueError("limit must be positive or None")
+    if max_dialogs_to_scan is not None and max_dialogs_to_scan <= 0:
+        raise ValueError("max_dialogs_to_scan must be positive or None")
+    keyword_lower = keyword.strip().casefold()
     matching_chats = []
-    count = 0
     dialogs_scanned = 0
+    stop_reason = "exhausted"
 
-    async for dialog in client.iter_dialogs():
-        dialogs_scanned += 1
-        if max_dialogs_to_scan is not None and dialogs_scanned >= max_dialogs_to_scan:
-            break
-
+    # Limit on the transport iterator, not only on the returned list.
+    async for dialog in client.iter_dialogs(limit=max_dialogs_to_scan):
         entity = dialog.entity
-        title = getattr(entity, "title", None) or getattr(entity, "first_name", "")
-
-        # Check keyword match
-        if not title or keyword_lower not in title.lower():
-            continue
-
-        # Determine chat type
+        dialogs_scanned += 1
+        title = display_name(entity)
+        username = getattr(entity, "username", None) or ""
+        matches = keyword_lower in title.casefold() or (
+            bool(username) and keyword_lower.lstrip("@") in username.casefold()
+        )
         current_type = get_chat_type(entity)
-
-        # Filter by type if requested
-        if chat_type and current_type != chat_type.lower():
-            continue
-
-        chat_info = format_chat_info(entity, dialog)
-        matching_chats.append(chat_info)
-        count += 1
-
-        # Apply limit if specified
-        if limit and count >= limit:
+        if matches and (not chat_type or current_type == chat_type.lower()):
+            matching_chats.append(format_chat_info(entity, dialog))
+            if limit is not None and len(matching_chats) >= limit:
+                stop_reason = "result_limit"
+                break
+        if max_dialogs_to_scan is not None and dialogs_scanned >= max_dialogs_to_scan:
+            # Even an exactly full final page cannot prove exhaustion without
+            # another request; report incomplete conservatively.
+            stop_reason = "scan_limit"
             break
 
     return {
@@ -118,6 +126,8 @@ async def search_chats_by_keyword_impl(
         "chat_type_filter": chat_type,
         "total_found": len(matching_chats),
         "dialogs_scanned": dialogs_scanned,
+        "scan_complete": stop_reason == "exhausted",
+        "stop_reason": stop_reason,
         "chats": matching_chats,
     }
 
